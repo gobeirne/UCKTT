@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="mi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Te reo Māori Kendall Toy Test</title>
+  <link rel="icon" href="icon-192.png" sizes="192x192" />
+  <meta name="theme-color" content="#000000" />
+  <style>
+    :root { --gap: 14px; }
+    html, body { height: 100%; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:#fafafa; color:#111; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    .bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .bar img { height: 42px; }
+    h1 { font-size: clamp(1.1rem, 2.4vw, 1.8rem); margin: 0; }
+
+    .controls { display:flex; gap:12px; flex-wrap:wrap; margin: 14px 0; align-items: center; }
+    select, button, label { padding: .55rem .8rem; border-radius: .6rem; border:1px solid #ccc; background:#fff; }
+    button { cursor:pointer; }
+    .muted { color:#666; }
+
+    .grid { display:grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: var(--gap); margin-top: 12px; }
+    .cell {
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      background:#fff; border:2px solid #bbb; border-radius: 16px; padding:10px; gap:8px;
+      user-select:none; transition: border-color .2s ease, box-shadow .2s ease, transform .06s ease;
+    }
+    .cell:active { transform: scale(.985); }
+    .cell.correct { border-color:#2e7d32; box-shadow: 0 0 0 2px rgba(46,125,50,.18); }
+    .cell.incorrect { border-color:#c62828; box-shadow: 0 0 0 2px rgba(198,40,40,.18); }
+
+    .thumb { width:100%; aspect-ratio: 1 / 1; object-fit: contain; }
+    .label { font-weight:600; font-size: 1rem; text-align:center; }
+    .status { min-height: 1.5rem; margin-top: 8px; }
+
+    /* Views */
+    .view { display:none; }
+    .view.active { display:block; }
+
+    /* Test header (icons) */
+    .test-topbar { display:flex; justify-content:flex-end; align-items:center; gap:10px; }
+    .iconbtn {
+      width: 38px; height: 38px; display:inline-flex; align-items:center; justify-content:center;
+      border:1px solid #ccc; background:#fff; border-radius: .6rem; cursor:pointer; font-size: 18px;
+    }
+    .iconbtn:active { transform: scale(.98); }
+
+    .footer { display:flex; justify-content: space-between; align-items:center; margin-top: 14px; font-size:.95rem; }
+    a.link { text-decoration: none; }
+	
+	/* Keep the test toolbar always clickable and above the grid */
+.test-topbar { position: sticky; top: 8px; z-index: 1000; pointer-events: auto; }
+
+/* Neutral highlight for hidden-correct mode */
+.cell.neutral {
+  border-color: #607d8b; /* neutral blue-grey */
+  box-shadow: 0 0 0 2px rgba(96,125,139,.20);
+}
+
+
+
+  </style>
+</head>
+<body>
+  <!-- SETTINGS VIEW -->
+  <div id="settingsView" class="view active">
+    <div class="container">
+      <div class="bar">
+        <img src="UClogo.png" alt="UC logo" />
+        <h1>Te reo Māori Kendall Toy Test</h1>
+      </div>
+
+      <p class="muted">Configure your test, then start or return to an in-progress session.</p>
+
+      <div class="controls">
+        <label>List
+          <select id="listSelect"></select>
+        </label>
+
+        <label><input type="checkbox" id="showLabels" checked> Show labels</label>
+        <label><input type="checkbox" id="randomize" /> Randomize order</label>
+      </div>
+
+      <div class="controls">
+        <label>Play each kupu
+          <select id="repeatCount">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3" selected>3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+            <option value="8">8</option>
+            <option value="9">9</option>
+            <option value="10">10</option>
+          </select>
+          times
+        </label>
+
+        <label><input type="checkbox" id="showProgress" checked> Show progress</label>
+        <label><input type="checkbox" id="showCorrect" checked> Show correct/incorrect</label>
+      </div>
+
+      <div class="controls">
+        <button id="startOrReturnBtn">Start test</button>
+        <button id="downloadResults" disabled>Download Results</button>
+        <span id="settingsHint" class="muted"></span>
+      </div>
+
+      <div class="grid" id="settingsPreviewGrid" aria-label="Preview grid (read-only)"></div>
+      <div class="status" id="settingsStatus"></div>
+    </div>
+  </div>
+
+  <!-- TEST VIEW -->
+  <div id="testView" class="view">
+    <div class="container">
+      <div class="test-topbar">
+        <button id="btnToSettingsPaused" class="iconbtn" title="Settings (pause test)" aria-label="Settings">⚙</button>
+        <button id="btnQuitTest" class="iconbtn" title="Quit test" aria-label="Quit">✖</button>
+      </div>
+
+      <div class="grid" id="grid" aria-label="15 choices grid"></div>
+      <div id="status" class="status"></div>
+
+      <div class="footer">
+        <div id="progressSummary" class="muted"></div>
+        <div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App -->
+  <script src="fifteenAFC.js"></script>
+
+  <!-- Inline TSV fallback for file:// (Option A) -->
+  <script type="text/plain" id="kupu-lists">
+/a/ /ā/	karaka	taraka	waka	 /e/ /ē/	keke	pere	wheke	 /i/ /ī/	ihu	inu	ipu	 /o/  /ō/	koro	koti	roro	/u/ /ū/	kutu	manu	motu
+/a/ /ā/	māmā	māra	pāpā	 /e/ /ē/	hēki	hēti	 /i/ /ī/	kīngi	rīngi	rīhi	tīhi	 /o/  /ō/	kōrero	kōtiro	tōtiti	/u/ /ū/	hū	motu	pū
+/a/ /ā/	māmā	māra	pāpā	 /ai/	wai	kai	pai	 /i/ /ī/	kīngi	rīngi	tīhi	 /o/  /ō/	tōtiti	kōrero	kōtiro	 /au/	kau	rau	tau
+/a/ /ā/	karaka	taraka	waka	 /ai/	kai	pai	wai	 /i/ /ī/	ihu	inu	ipu	 /o/  /ō/	roro	koro	koti	 /au/	kau	rau	tau
+/a/ /ā/	haka	mata	waka	 /ae/	waea	whaea	taea	 /i/ /ī/	ihu	inu	ipu	 /o/  /ō/	koro	roro	koti	 /au/	kau	rau	tau
+/a/ /ā/	mata	pata	 /ai/	tai	pai	wai	wai	 /i/ /ī/	pahi	tahi	paki	 /o/  /ō/	koro	mako	moko	 /au/	kau	rau	tau
+/a/ /ā/	mahi	paki	tahi	 /ai/	kai	pai	tai	 /i/ /ī/	rīhi	rīngi	kīngi	 /o/  /ō/	koro	poti	koti	 /au/	kau	rau	tau
+/a/ /ā/	paki	pahi	tahi	 /ai/	kai	pai	tai	 /i/ /ī/	rīngi	rīhi	tīhi	 /o/  /ō/	koti	poti	koro	 /au/	kau	rau	tau
+/a/ /ā/	māra	māmā	tāra	 /ai/	pai	tai	wai	 /i/ /ī/	pahi	tahi	paki	 /o/  /ō/	koro	moko	mako	 /au/	kau	rau	tau
+/a/ /ā/	haka	mata	pata	 /ai/	tai	kai	wai	 /i/ /ī/	pahi	paki	tahi	 /o/  /ō/	kōrero	kōtiro	tōtiti	 /au/	kau	rau	tau
+/a/ /ā/	haka	mata	waka	 /ai/	pai	kai	tai	 /i/ /ī/	ihu	inu	ipu	 /o/  /ō/	kōrero	tōtiti	kōtiro	 /au/	kau	rau	tau
+  </script>
+</body>
+</html>
