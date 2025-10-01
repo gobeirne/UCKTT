@@ -46,7 +46,7 @@
   const DATA_URL    = 'kupu_lists.tsv';
   const IMAGE_DIR   = 'Images';
   const AUDIO_DIR   = 'sounds';
-  const SUCCESS_IMG = `${IMAGE_DIR}/thumbs-up.png`;
+  const SUCCESS_IMG = `${IMAGE_DIR}/pai.png`;
   const END_PHRASES = ['Tau kē koe!','Ki a koe hoki!','Karawhiua!','Koia te hāngaitanga!','Mīharo!'];
 
   const USE_INLINE_LISTS = location.protocol === 'file:';
@@ -155,7 +155,7 @@
     audioBufferCache.set(url, buf);
     return buf;
   }
-  const keiHeaTeURL  = () => `${AUDIO_DIR}/Kei hea te_01.mp3`; // fixed version
+  const keiHeaTeURL  = () => `${AUDIO_DIR}/Kei_hea_te_01.mp3`; // fixed version
   const kupuAudioURL = (kupu) => encodeURL(AUDIO_DIR, kupu, 'mp3');
 
   // -------- Responsive sizing: scale grid to viewport (both axes) --------
