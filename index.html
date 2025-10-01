@@ -157,6 +157,16 @@
 
         <label><input type="checkbox" id="showLabels" > Show labels</label>
         <label><input type="checkbox" id="randomize" checked /> Randomize order</label>
+		<!-- Add somewhere in your settings controls -->
+<button id="preloadBtn">Preload assets for offline</button>
+<span id="preloadStatus" class="muted"></span>
+
+<script type="module">
+  import { wirePreloadUI } from './preload-ktt.js';
+  wirePreloadUI(document.getElementById('preloadBtn'),
+                document.getElementById('preloadStatus'));
+</script>
+
       </div>
 
       <div class="controls">

@@ -1,7 +1,11 @@
-/* sw.js — simple PWA cache for KTT 15 */
-const CACHE_VERSION = 'ktt-v1';
+/* sw.js — KTT PWA with precache list + sane fetch strategies */
+
+const CACHE_NAME = 'ktt-precache-v3';
+
+// App shell (always cached)
 const APP_SHELL = [
   './index.html',
+  './fifteenAFC.html',            // include in case you land here directly
   './fifteenAFC.js',
   './manifest.webmanifest',
   './Images/pai.png',
@@ -10,100 +14,135 @@ const APP_SHELL = [
   './icon-512.png'
 ];
 
-// Try to add optional assets, but don’t fail install if missing
+// Best-effort optional items
 const OPTIONAL = [
-  './kupu_lists.tsv',                  // only if you’re fetching TSV (not needed if inline)
-  './sounds/Kei_hea_te_01.mp3'        // preface (space is fine in URL)
+  './kupu_lists.tsv',
+  './sounds/Kei_hea_te_01.mp3'    // preface audio
 ];
 
-self.addEventListener('install', event => {
+// Where the preload list lives (one path per line)
+const PRELOAD_LIST = 'preloadfilelist.txt';
+
+// --- Install: precache shell + preload list (if present) ---
+self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
-    const cache = await caches.open(CACHE_VERSION);
-    // Precache shell
+    const cache = await caches.open(CACHE_NAME);
+
+    // 1) App shell (must-have)
     await cache.addAll(APP_SHELL);
-    // Optional files (best-effort)
+
+    // 2) Optional files (best-effort)
     for (const url of OPTIONAL) {
-      try { await cache.add(url); } catch (e) { /* ignore */ }
+      try { await cache.add(url); } catch (_) {}
     }
-    self.skipWaiting();
+
+    // 3) Preload list (if present)
+    try {
+      const scopeURL = new URL(self.registration.scope);
+      const res = await fetch(new URL(PRELOAD_LIST, scopeURL), { cache: 'no-store' });
+      if (res.ok) {
+        const raw = await res.text();
+        const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+        // Normalize + encode each path segment (macrons/spaces safe)
+        const urls = lines.map((p) => {
+          // Adjust folder case if your repo uses 'Images' but list says 'images'
+          const fixed = p.replace(/^images\//, 'Images/').replace(/^sounds\//, 'sounds/');
+          const segs = fixed.split('/').map(encodeURIComponent).join('/');
+          return new URL(segs, scopeURL).toString();
+        });
+
+        // Add in small chunks to be nicer to mobile
+        const chunk = 32;
+        for (let i = 0; i < urls.length; i += chunk) {
+          const part = urls.slice(i, i + chunk);
+          try { await cache.addAll(part); } catch (_) { /* continue */ }
+        }
+
+        // Optional log (visible in Application → Service Workers)
+        console.log(`SW: precached ${urls.length} assets from ${PRELOAD_LIST}`);
+      }
+    } catch (err) {
+      console.warn('SW: no preload list or failed to precache it', err);
+    }
+
+    await self.skipWaiting();
   })());
 });
 
-self.addEventListener('activate', event => {
+// --- Activate: clean up old caches, take control ---
+self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
-    const keys = await caches.keys();
-    await Promise.all(keys.map(k => (k === CACHE_VERSION ? null : caches.delete(k))));
-    self.clients.claim();
+    const keep = new Set([CACHE_NAME]);
+    const names = await caches.keys();
+    await Promise.all(names.map(n => keep.has(n) ? null : caches.delete(n)));
+    await self.clients.claim();
   })());
 });
 
-/* Strategy:
-   - Navigations & HTML/JS/CSS: stale-while-revalidate.
-   - Images: cache-first (good offline).
-   - Audio: network-first (avoid bloating cache / Range issues). */
-self.addEventListener('fetch', event => {
+// --- Fetch: one handler, clear rules ---
+// - Navigations: network-first (fallback to cached HTML)
+// - Images & Audio: cache-first (populate cache on miss)  ← offline friendly
+// - Everything else (JS/CSS/data): stale-while-revalidate
+self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
 
-  // Only handle same-origin
+  // Same-origin only
   if (url.origin !== location.origin) return;
 
   // HTML navigations
-  if (req.mode === 'navigate') {
-    event.respondWith((async () => {
-      try {
-        const net = await fetch(req);
-        const cache = await caches.open(CACHE_VERSION);
-        cache.put(req, net.clone());
-        return net;
-      } catch {
-        const cache = await caches.open(CACHE_VERSION);
-        return (await cache.match('./fifteenAFC.html')) || Response.error();
-      }
-    })());
+  if (req.mode === 'navigate' || req.destination === 'document') {
+    event.respondWith(networkFirstHTML(req));
     return;
   }
 
-  // Static assets
-  if (req.destination === 'image') {
+  // Static media: images + audio
+  if (/\.(png|jpg|jpeg|webp|gif|svg|mp3|wav|ogg)$/i.test(url.pathname)) {
     event.respondWith(cacheFirst(req));
     return;
   }
-  if (req.destination === 'audio') {
-    event.respondWith(networkFirst(req));
-    return;
-  }
 
-  // Default: stale-while-revalidate for JS/CSS/data
+  // Default: JS/CSS/data → stale-while-revalidate
   event.respondWith(staleWhileRevalidate(req));
 });
 
+// --- Strategies ---
+
 async function cacheFirst(req) {
-  const cache = await caches.open(CACHE_VERSION);
+  const cache = await caches.open(CACHE_NAME);
   const cached = await cache.match(req);
   if (cached) return cached;
-  const net = await fetch(req);
-  cache.put(req, net.clone());
-  return net;
-}
-
-async function networkFirst(req) {
-  const cache = await caches.open(CACHE_VERSION);
   try {
     const net = await fetch(req);
-    cache.put(req, net.clone());
+    if (net && net.ok) cache.put(req, net.clone());
     return net;
   } catch {
-    const cached = await cache.match(req);
     return cached || Response.error();
   }
 }
 
+async function networkFirstHTML(req) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const net = await fetch(req);
+    if (net && net.ok) cache.put(req, net.clone());
+    return net;
+  } catch {
+    // Fallback to whichever HTML we have
+    const fallback =
+      (await cache.match(req)) ||
+      (await cache.match('./fifteenAFC.html')) ||
+      (await cache.match('./index.html'));
+    return fallback || Response.error();
+  }
+}
+
 async function staleWhileRevalidate(req) {
-  const cache = await caches.open(CACHE_VERSION);
+  const cache = await caches.open(CACHE_NAME);
   const cached = await cache.match(req);
   const netPromise = fetch(req).then(res => {
-    cache.put(req, res.clone());
+    if (res && res.ok) cache.put(req, res.clone());
     return res;
   }).catch(() => null);
   return cached || (await netPromise) || Response.error();
