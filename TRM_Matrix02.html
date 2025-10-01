@@ -245,7 +245,18 @@ function loadSample(i) {
   audio.pause();
   audio.currentTime = 0;
   audio.src = samples[i].src;
+
+  // NEW: autoplay when moving to the next
+  audio.oncanplaythrough = () => {
+    audio.play().catch(err => {
+      // autoplay may be blocked until user clicks once
+      console.warn("Autoplay blocked:", err);
+    });
+    // clear handler so it doesn’t run multiple times
+    audio.oncanplaythrough = null;
+  };
 }
+
 
 function commitAndNext() {
   if (!validateReady()) return;
@@ -304,3 +315,4 @@ loadSample(sampleIdx);
 </script>
 </body>
 </html>
+
