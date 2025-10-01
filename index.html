@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Te reo Māori Kendall Toy Test</title>
   <link rel="icon" href="icon-192.png" sizes="192x192" />
+  <!-- in <head> -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#ffffff">
+<!-- iOS PWA support -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="icons/icon-512.png">
   <meta name="theme-color" content="#000000" />
   <style>
     :root { --gap: 14px; }
@@ -61,6 +70,17 @@
 
 
   </style>
+<script>
+  // Register the service worker
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then(reg => console.log('SW registered', reg.scope))
+        .catch(err => console.error('SW registration failed', err));
+    });
+  }
+</script>
+
 </head>
 <body>
   <!-- SETTINGS VIEW -->
@@ -78,16 +98,16 @@
           <select id="listSelect"></select>
         </label>
 
-        <label><input type="checkbox" id="showLabels" > Show labels</label>
+        <label><input type="checkbox" id="showLabels" checked> Show labels</label>
         <label><input type="checkbox" id="randomize" /> Randomize order</label>
       </div>
 
       <div class="controls">
         <label>Play each kupu
           <select id="repeatCount">
-            <option value="1" selected>1</option>
+            <option value="1">1</option>
             <option value="2">2</option>
-            <option value="3">3</option>
+            <option value="3" selected>3</option>
             <option value="4">4</option>
             <option value="5">5</option>
             <option value="6">6</option>
@@ -100,7 +120,7 @@
         </label>
 
         <label><input type="checkbox" id="showProgress" checked> Show progress</label>
-        <label><input type="checkbox" id="showCorrect" > Show correct/incorrect</label>
+        <label><input type="checkbox" id="showCorrect" checked> Show correct/incorrect</label>
       </div>
 
       <div class="controls">
@@ -151,4 +171,3 @@
   </script>
 </body>
 </html>
-
