@@ -1,24 +1,22 @@
-// fifteenAFC.js — Kendall Toy Test (15 items) with two screens + robust debug
-// - Exact filenames (macrons/spaces preserved; URLs are encoded on load)
+// fifteenAFC.js — Kendall Toy Test (15 items) with two screens, responsive grid, and robust audio
+// - Exact filenames (macrons & spaces preserved; URLs encoded when fetching)
 // - Inline TSV on file://; fetch TSV on http/https
 // - GAPLESS “Kei hea te_01” + kupu via WebAudio (fallback to HTMLAudio on file://)
 // - Clicks accepted from kupu onset (not during preface)
 // - Settings screen: tap preview to hear kupu only (training)
 // - Test screen: ⚙ pause to settings; ✖ quit; Esc = quit; S = pause
 // - Show/hide labels, progress, correct/incorrect; neutral glow when hidden
-// - Resuming after settings changes: grid is repainted preserving order + options applied
+// - Resuming after settings changes: grid repaints preserving order + options applied
+// - Responsive grid: landscape=5×3, portrait=3×5; auto-sizes squares to fill space
 // - End screen thumbs-up + phrase, auto-saves .txt and tells user where it went
-// - Verbose console logs (toggle DEBUG below)
+// - Verbose console logs toggle (DEBUG)
 
 (() => {
   // ===== DEBUG =====
-  const DEBUG = true; // set to false to quiet logs
+  const DEBUG = false; // set to true for verbose logs
   const dbg  = (...a) => { if (DEBUG) console.log('[KTT DEBUG]', ...a); };
   const warn = (...a) => console.warn('[KTT WARN]', ...a);
   const err  = (...a) => console.error('[KTT ERROR]', ...a);
-
-  window.addEventListener('error', (e) => err('window.onerror', e.message, e.error || e));
-  window.addEventListener('unhandledrejection', (e) => err('unhandledrejection', e.reason));
 
   // ===== Shortcuts =====
   const $ = (s) => document.querySelector(s);
@@ -43,26 +41,16 @@
   // Test DOM
   const gridEl            = $('#grid');
   const statusEl          = $('#status');
-  const progressSummaryEl = $('#progressSummary'); // reserved
+  const progressSummaryEl = $('#progressSummary'); // optional
   const btnToSettings     = $('#btnToSettingsPaused');
   const btnQuitTest       = $('#btnQuitTest');
   const testTopbar        = document.querySelector('.test-topbar') || $('#testTopbar');
-
-  dbg('Init elements', {
-    settingsView: !!settingsView, testView: !!testView,
-    listSel: !!listSel, showLabelsEl: !!showLabelsEl, randomizeEl: !!randomizeEl,
-    repeatCountEl: !!repeatCountEl, showProgressEl: !!showProgressEl, showCorrectEl: !!showCorrectEl,
-    startOrReturnBtn: !!startOrReturnBtn, downloadBtn: !!downloadBtn,
-    settingsPreview: !!settingsPreview, gridEl: !!gridEl, statusEl: !!statusEl,
-    btnToSettings: !!btnToSettings, btnQuitTest: !!btnQuitTest, testTopbar: !!testTopbar,
-  });
 
   // ===== Paths & config =====
   const DATA_URL   = 'kupu_lists.tsv';     // used on http/https if no inline block present
   const IMAGE_DIR  = 'Images';
   const AUDIO_DIR  = 'sounds';
-  const SUCCESS_IMG= `${IMAGE_DIR}/pai.png`;
-
+  const SUCCESS_IMG= `${IMAGE_DIR}/thumbs-up.png`;
   const END_PHRASES = ['Tau kē koe!','Ki a koe hoki!','Karawhiua!','Koia te hāngaitanga!','Mīharo!'];
 
   const USE_INLINE_LISTS = location.protocol === 'file:';
@@ -115,9 +103,9 @@
     return a;
   }
   const randChoice = (arr) => arr[Math.floor(Math.random()*arr.length)];
+  const isLandscape = () => window.innerWidth >= window.innerHeight;
 
   function clearTimersAndAudio() {
-    dbg('clearTimersAndAudio()');
     [playbackDoneTimer, kupuOnsetTimer, isiTimer].forEach(t => t && clearTimeout(t));
     playbackDoneTimer = kupuOnsetTimer = isiTimer = null;
 
@@ -146,14 +134,12 @@
     return lines.map(parseLineToKupu).filter(row => row.length === 15);
   }
   async function loadLists() {
-    dbg('loadLists() inline?', USE_INLINE_LISTS);
     if (USE_INLINE_LISTS) {
       const node = document.getElementById('kupu-lists');
       if (node && node.textContent.trim()) {
         const parsed = parseTextToLists(node.textContent);
         if (parsed.length) return parsed;
       }
-      // attempt fetch even on file:// (often blocked, but harmless)
       try {
         const r = await fetch(DATA_URL, { cache: 'no-store' });
         if (r.ok) {
@@ -172,7 +158,6 @@
           if (parsed.length) return parsed;
         }
       } catch(e) { warn('fetch failed', e); }
-      // fallback to inline if present
       const node = document.getElementById('kupu-lists');
       if (node && node.textContent.trim()) {
         const parsed = parseTextToLists(node.textContent);
@@ -194,11 +179,45 @@
   }
   function keiHeaTeURL() {
     // Fixed selection as requested (no randomization)
-    return `${AUDIO_DIR}/Kei_hea_te_01.mp3`;
+    return `${AUDIO_DIR}/Kei hea te_01.mp3`;
   }
   function kupuAudioURL(kupu) {
     // Filenames exactly match kupu (macrons & spaces preserved)
     return encodeURL(AUDIO_DIR, kupu, 'mp3');
+  }
+
+  // ===== Responsive sizing =====
+  // Computes the largest square cell that fits the grid area; updates on render/resize.
+  function fitGridToViewport() {
+    if (!gridEl) return;
+    const cols = isLandscape() ? 5 : 3;
+    const rows = isLandscape() ? 3 : 5;
+
+    // ensure grid container is centered (inline so we don't rely on external CSS)
+    gridEl.style.justifyContent = 'center';
+    gridEl.style.alignContent = 'center';
+
+    // Use computed gap; default 14px if not set
+    const styles = getComputedStyle(gridEl);
+    const gap = parseFloat(styles.gap) || 14;
+
+    const w = gridEl.clientWidth;
+    const h = gridEl.clientHeight;
+
+    // If grid has no height yet (e.g., visibility just toggled), fallback to window
+    const availW = w || (window.innerWidth - 32);
+    const availH = h || (window.innerHeight - 160); // heuristic for headers/toolbars
+
+    const sizeW = (availW - gap * (cols - 1)) / cols;
+    const sizeH = (availH - gap * (rows - 1)) / rows;
+    const cell = Math.floor(Math.max(60, Math.min(sizeW, sizeH))); // clamp min
+
+    // Apply directly: fixed-size columns of "cell" width
+    gridEl.style.gridTemplateColumns = `repeat(${cols}, ${cell}px)`;
+
+    // Update individual cell widths (square via .thumb aspect-ratio)
+    const cells = gridEl.querySelectorAll('.cell');
+    cells.forEach(c => { c.style.width = `${cell}px`; });
   }
 
   // ===== View helpers =====
@@ -216,6 +235,8 @@
     testView.classList.add('active');
     ensureTopbarOnTop();
     stopTrainingAudio();
+    // Fit after layout settles
+    requestAnimationFrame(() => fitGridToViewport());
   }
   function ensureTopbarOnTop() {
     if (!testTopbar) return;
@@ -242,7 +263,7 @@
   function renderGrid(kupu15) {
     gridEl.innerHTML = '';
     statusEl.textContent = '';
-    progressSummaryEl && (progressSummaryEl.textContent = '');
+    if (progressSummaryEl) progressSummaryEl.textContent = '';
 
     const items = (randomizeEl && randomizeEl.checked) ? shuffle(kupu15) : kupu15.slice();
     gridOrder = items.slice(); // remember order used for the test
@@ -268,6 +289,8 @@
       cell.addEventListener('click', () => handleResponse(kupu));
       gridEl.appendChild(cell);
     });
+
+    fitGridToViewport();
   }
 
   // Repaint the test grid preserving current gridOrder (used when resuming)
@@ -295,6 +318,8 @@
       cell.addEventListener('click', () => handleResponse(kupu));
       gridEl.appendChild(cell);
     });
+
+    fitGridToViewport();
   }
 
   // Apply visibility options to the already-rendered grid (labels/progress)
@@ -376,6 +401,15 @@
   }
 
   // ===== Trial playback (phrase + kupu; clicks enabled at kupu onset) =====
+  async function getAudioBuffer(url) {
+    if (audioBufferCache.has(url)) return audioBufferCache.get(url);
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`fetch failed: ${url}`);
+    const arr = await res.arrayBuffer();
+    const buf = await AUDIO_CTX.decodeAudioData(arr);
+    audioBufferCache.set(url, buf);
+    return buf;
+  }
   async function playPromptThenKupu(kupu, onDone) {
     clearTimersAndAudio();
 
@@ -507,7 +541,7 @@
     testPaused = false;
     clearTimersAndAudio();
     statusEl.textContent = '';
-    progressSummaryEl && (progressSummaryEl.textContent = '');
+    if (progressSummaryEl) progressSummaryEl.textContent = '';
     currentTarget = null;
     showSettings();
   }
@@ -706,13 +740,13 @@
     });
     showLabelsEl.addEventListener('change', () => {
       renderSettingsPreview();
-      // If paused, future resume should reflect visibility — we repaint on resume.
+      // If paused, future resume repaints from preserved order
     });
     randomizeEl.addEventListener('change', renderSettingsPreview);
     repeatCountEl.addEventListener('change', () => {});
     showProgressEl.addEventListener('change', () => {
       if (testInProgress && testPaused) {
-        // just ensure when resuming, the UI will reflect it via applyDisplayOptions…
+        // ensure when resuming, UI reflects new setting
       }
     });
     showCorrectEl.addEventListener('change', () => {});
@@ -741,7 +775,10 @@
     bindToolbarDirect();
     bindToolbarDelegation();
     ensureTopbarOnTop();
-    window.addEventListener('resize', ensureTopbarOnTop);
+    window.addEventListener('resize', () => {
+      // On rotate / resize, recompute cell size if test is visible
+      if (testView.classList.contains('active')) fitGridToViewport();
+    });
     window.addEventListener('keydown', handleHotkeys, true);
 
     // Defensive grid delegation (kept alongside per-cell handlers)
