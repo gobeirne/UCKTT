@@ -5,18 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Te reo Māori Kendall Toy Test</title>
   <link rel="icon" href="icon-192.png" sizes="192x192" />
-  <!-- in <head> -->
-<link rel="manifest" href="manifest.webmanifest">
+
+
+  <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#ffffff">
-<!-- iOS PWA support -->
+
+<!-- PWA (Chrome/Android) -->
+<meta name="mobile-web-app-capable" content="yes">
+
+<!-- PWA (iOS) -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="apple-touch-icon" href="icons/icon-192.png">
-<link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png">
-<link rel="apple-touch-icon" sizes="512x512" href="icons/icon-512.png">
-  <meta name="theme-color" content="#000000" />
+<link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="icon-512.png">
+
+    
 <style>
   :root { --gap: 14px; --cell: 140px; }
 
@@ -52,18 +55,26 @@
     box-sizing: border-box;
   }
 
-  /* Test grid: consume remaining vertical space, center both axes */
+  /* Test view: allow full device width (remove the 1100px cap) */
+  #testView .container {
+    max-width: none;
+    width: 100%;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+
+  /* Test grid: take remaining vertical space, start at top to avoid big row gaps */
   #testView .grid {
     flex: 1 1 auto;
-    min-height: 0;                 /* prevents flex overflow on iOS */
+    min-height: 0; /* prevents flex overflow on iOS */
     display: grid;
-    gap: var(--gap, 14px);
-    justify-content: center;       /* center horizontally */
-    align-content: center;         /* center vertically */
+    gap: clamp(8px, 1.6vw, 14px);   /* slightly smaller on phones, max 14px */
+    justify-content: center;        /* center horizontally */
+    align-content: start;           /* start at top to avoid extra vertical whitespace */
     margin-top: 12px;
   }
 
-  /* JS computes exact columns/size; these are optional orientation helpers */
+  /* Orientation helpers (JS will still compute exact size/columns) */
   .grid.landscape { grid-template-columns: repeat(5, var(--cell, 140px)); }
   .grid.portrait  { grid-template-columns: repeat(3, var(--cell, 140px)); }
 
@@ -74,7 +85,7 @@
 
   /* Cells & content */
   .cell {
-    width: var(--cell, 140px); /* JS may override via inline width; this is a sane default */
+    width: var(--cell, 140px);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -86,6 +97,7 @@
     gap: 8px;
     user-select: none;
     transition: border-color .2s ease, box-shadow .2s ease, transform .06s ease;
+    box-sizing: border-box; /* prevent wrap/overlap from border width */
   }
   .cell:active { transform: scale(.985); }
 
@@ -100,7 +112,7 @@
 
   /* Test header (icons) */
   .test-topbar {
-    position: fixed;   /* fixed to ensure always clickable above grid */
+    position: fixed;   /* ensure always clickable above grid */
     top: 8px;
     right: 16px;
     z-index: 2147483647;
@@ -126,6 +138,7 @@
   .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; font-size: .95rem; }
   a.link { text-decoration: none; }
 </style>
+
 
 <script>
   // Register the service worker
