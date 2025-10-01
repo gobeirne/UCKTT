@@ -15,61 +15,116 @@
 <link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" sizes="512x512" href="icons/icon-512.png">
   <meta name="theme-color" content="#000000" />
-  <style>
-    :root { --gap: 14px; }
-    html, body { height: 100%; }
-    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:#fafafa; color:#111; }
-    .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
-    .bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-    .bar img { height: 42px; }
-    h1 { font-size: clamp(1.1rem, 2.4vw, 1.8rem); margin: 0; }
+<style>
+  :root { --gap: 14px; --cell: 140px; }
 
-    .controls { display:flex; gap:12px; flex-wrap:wrap; margin: 14px 0; align-items: center; }
-    select, button, label { padding: .55rem .8rem; border-radius: .6rem; border:1px solid #ccc; background:#fff; }
-    button { cursor:pointer; }
-    .muted { color:#666; }
+  /* Fill the screen, handle iOS browser chrome safely */
+  html, body { height: 100%; }
+  body {
+    min-height: 100dvh;
+    margin: 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: #fafafa;
+    color: #111;
+  }
 
-    .grid { display:grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: var(--gap); margin-top: 12px; }
-    .cell {
-      display:flex; flex-direction:column; align-items:center; justify-content:center;
-      background:#fff; border:2px solid #bbb; border-radius: 16px; padding:10px; gap:8px;
-      user-select:none; transition: border-color .2s ease, box-shadow .2s ease, transform .06s ease;
-    }
-    .cell:active { transform: scale(.985); }
-    .cell.correct { border-color:#2e7d32; box-shadow: 0 0 0 2px rgba(46,125,50,.18); }
-    .cell.incorrect { border-color:#c62828; box-shadow: 0 0 0 2px rgba(198,40,40,.18); }
+  /* General layout */
+  .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .bar img { height: 42px; }
+  h1 { font-size: clamp(1.1rem, 2.4vw, 1.8rem); margin: 0; }
 
-    .thumb { width:100%; aspect-ratio: 1 / 1; object-fit: contain; }
-    .label { font-weight:600; font-size: 1rem; text-align:center; }
-    .status { min-height: 1.5rem; margin-top: 8px; }
+  /* Controls */
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0; align-items: center; }
+  select, button, label { padding: .55rem .8rem; border-radius: .6rem; border: 1px solid #ccc; background: #fff; }
+  button { cursor: pointer; }
+  .muted { color: #666; }
 
-    /* Views */
-    .view { display:none; }
-    .view.active { display:block; }
+  /* Views (settings/test) */
+  .view { display: none; }
+  .view.active {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom) 16px;
+    box-sizing: border-box;
+  }
 
-    /* Test header (icons) */
-    .test-topbar { display:flex; justify-content:flex-end; align-items:center; gap:10px; }
-    .iconbtn {
-      width: 38px; height: 38px; display:inline-flex; align-items:center; justify-content:center;
-      border:1px solid #ccc; background:#fff; border-radius: .6rem; cursor:pointer; font-size: 18px;
-    }
-    .iconbtn:active { transform: scale(.98); }
+  /* Test grid: consume remaining vertical space, center both axes */
+  #testView .grid {
+    flex: 1 1 auto;
+    min-height: 0;                 /* prevents flex overflow on iOS */
+    display: grid;
+    gap: var(--gap, 14px);
+    justify-content: center;       /* center horizontally */
+    align-content: center;         /* center vertically */
+    margin-top: 12px;
+  }
 
-    .footer { display:flex; justify-content: space-between; align-items:center; margin-top: 14px; font-size:.95rem; }
-    a.link { text-decoration: none; }
-	
-	/* Keep the test toolbar always clickable and above the grid */
-.test-topbar { position: sticky; top: 8px; z-index: 1000; pointer-events: auto; }
+  /* JS computes exact columns/size; these are optional orientation helpers */
+  .grid.landscape { grid-template-columns: repeat(5, var(--cell, 140px)); }
+  .grid.portrait  { grid-template-columns: repeat(3, var(--cell, 140px)); }
 
-/* Neutral highlight for hidden-correct mode */
-.cell.neutral {
-  border-color: #607d8b; /* neutral blue-grey */
-  box-shadow: 0 0 0 2px rgba(96,125,139,.20);
-}
+  /* Fallback (non-JS) so it still looks reasonable */
+  .grid:not(.landscape):not(.portrait) {
+    grid-template-columns: repeat(5, minmax(120px, 1fr));
+  }
 
+  /* Cells & content */
+  .cell {
+    width: var(--cell, 140px); /* JS may override via inline width; this is a sane default */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+    border: 2px solid #bbb;
+    border-radius: 16px;
+    padding: 10px;
+    gap: 8px;
+    user-select: none;
+    transition: border-color .2s ease, box-shadow .2s ease, transform .06s ease;
+  }
+  .cell:active { transform: scale(.985); }
 
+  .cell.correct   { border-color: #2e7d32; box-shadow: 0 0 0 2px rgba(46,125,50,.18); }
+  .cell.incorrect { border-color: #c62828; box-shadow: 0 0 0 2px rgba(198,40,40,.18); }
+  .cell.neutral   { border-color: #607d8b; box-shadow: 0 0 0 2px rgba(96,125,139,.20); }
 
-  </style>
+  .thumb { width: 100%; aspect-ratio: 1 / 1; object-fit: contain; }
+  .label { font-weight: 600; font-size: 1rem; text-align: center; }
+
+  .status { min-height: 1.5rem; margin-top: 8px; }
+
+  /* Test header (icons) */
+  .test-topbar {
+    position: fixed;   /* fixed to ensure always clickable above grid */
+    top: 8px;
+    right: 16px;
+    z-index: 2147483647;
+    pointer-events: auto;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(6px);
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid #ccc;
+  }
+  .iconbtn {
+    width: 38px; height: 38px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid #ccc; background: #fff; border-radius: .6rem;
+    cursor: pointer; font-size: 18px;
+  }
+  .iconbtn:active { transform: scale(.98); }
+
+  .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; font-size: .95rem; }
+  a.link { text-decoration: none; }
+</style>
+
 <script>
   // Register the service worker
   if ('serviceWorker' in navigator) {
@@ -98,8 +153,8 @@
           <select id="listSelect"></select>
         </label>
 
-        <label><input type="checkbox" id="showLabels" > Show labels</label>
-        <label><input type="checkbox" id="randomize" checked /> Randomize order</label>
+        <label><input type="checkbox" id="showLabels" checked> Show labels</label>
+        <label><input type="checkbox" id="randomize" /> Randomize order</label>
       </div>
 
       <div class="controls">
@@ -119,8 +174,8 @@
           times
         </label>
 
-        <label><input type="checkbox" id="showProgress"> Show progress</label>
-        <label><input type="checkbox" id="showCorrect"> Show correct/incorrect</label>
+        <label><input type="checkbox" id="showProgress" > Show progress</label>
+        <label><input type="checkbox" id="showCorrect" > Show correct/incorrect</label>
       </div>
 
       <div class="controls">
@@ -171,4 +226,3 @@
   </script>
 </body>
 </html>
-
