@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="mi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Triplet Selection Task</title>
+<style>
+:root{
+  /* Light theme (UCKTT-like) */
+  --bg: #f7fafc;          /* page background */
+  --panel: #ffffff;       /* cards/panels/buttons */
+  --border: #d1d5db;      /* light grey border */
+  --border-hover: #94a3b8;/* hover border */
+  --text: #0f172a;        /* near-black text */
+  --muted: #64748b;       /* secondary text */
+  --accent: #16a34a;      /* UC-ish green */
+  --accent-weak: #86efac; /* soft green for rings/fills */
+  --choice-hover: #f1f5f9;/* hover bg for choices */
+  --choice-selected: #ecfdf5; /* selected bg tint */
+}
+
+html,body{
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans",
+               "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  margin:0; padding:0;
+}
+
+.wrap{ max-width:980px; margin:40px auto; padding:16px; }
+
+.panel{
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: 0 6px 18px rgba(2,6,23,.06);
+}
+
+header{
+  display:grid; grid-template-columns:1fr auto auto;
+  gap:12px; align-items:center; margin-bottom:14px;
+}
+h1{ font-size:18px; font-weight:700; margin:0; color:var(--text); }
+.meta{ font-size:13px; color:var(--muted); }
+.controls{ display:flex; gap:10px; }
+
+button,.btn{
+  appearance:none;
+  border:1px solid var(--border);
+  background:var(--panel);
+  color:var(--text);
+  padding:10px 14px; border-radius:12px; font-size:14px; cursor:pointer;
+  transition:transform .02s ease, border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+button:hover{ border-color:var(--border-hover); background:#ffffff; }
+button:active{ transform:translateY(1px); }
+.primary{ border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-weak) inset; }
+.primary:disabled{ opacity:.5; cursor:not-allowed; }
+
+.grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+.col{ display:grid; grid-template-rows:repeat(11, minmax(40px,auto)); gap:10px; }
+
+.choice{
+  display:inline-flex; align-items:center; justify-content:center; gap:.35ch;
+  padding:10px 12px; border-radius:12px;
+  border:1px solid var(--border); background:var(--panel); color:var(--text);
+  font-size:16px; line-height:1; cursor:pointer; user-select:none; white-space:nowrap;
+}
+.choice .dim{ color:var(--muted); }
+.choice.hidden{ visibility:hidden; }
+.choice:hover{ background:var(--choice-hover); border-color:var(--border-hover); }
+.choice.selected{
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-weak) inset, 0 0 0 1px var(--accent);
+  background: var(--choice-selected);
+}
+
+.bottom{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:14px; margin-top:16px;
+}
+.progress{
+  height:6px; width:100%;
+  background:#e5e7eb; border:1px solid var(--border);
+  border-radius:999px; overflow:hidden;
+}
+.progress>i{ display:block; height:100%; width:0%; background:var(--accent); }
+
+.note{ font-size:12px; color:var(--muted); }
+
+.summary{
+  margin-top:18px; font-size:14px; white-space:pre;
+  background:var(--panel); border:1px solid var(--border);
+  padding:12px 14px; border-radius:12px; color:var(--text);
+}
+
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <header>
+      <!-- <img src="UClogo.png" alt="UC logo" /><h1>Te reo Māori Matrix Sentence Test</h1>-->
+	   <!-- UC Logo Header -->
+<div style="display:flex; align-items:center; gap:12px; margin:20px 40px;">
+  <img src="https://gobeirne.github.io/UCKTT/UClogo.png" 
+       alt="University of Canterbury Logo" 
+       style="height:40px; width:auto;">
+  <span style="font-size:20px; font-weight:600; color:#0f172a;">
+    Te reo Māori Matrix Sentence Test
+  </span>
+</div>
+
+        <div class="meta" id="counter">Sentence 1 / 5</div>
+        <div class="controls">
+          <button id="playBtn" class="primary" title="Play / Replay (Space)">▶ Play</button>
+          <button id="nextBtn" class="primary" disabled title="Next (Enter)">Next ▷</button>
+        </div>
+      </header>
+
+      <div class="grid" id="grid">
+        <!-- columns injected -->
+      </div>
+
+      <div class="bottom">
+        <div class="progress"><i id="bar"></i></div>
+        <div class="note">Tip: Space = Play / Pause, Enter = Next</div>
+      </div>
+
+      <div class="summary" id="summary" hidden></div>
+    </div>
+  </div>
+
+<script>
+/* ====================== DATA ====================== */
+
+const col1_numbers = [null, null, "rua", "toru", "rima", "ono", "whitu", "waru", "iwa", null, null];
+const col2_nouns   = ["hipi","ika","keke","koha","kura","manu","pepa","puna","tatau","waka","whare"];
+const col3_adjs    = [null, "hou","iti","kōwhai","nui","paku","rahi","roa","tawa","whero", null];
+
+const samples = [
+  { id:"S1", src:"eiwa_nga_hipi_hou.wav",    answer:{c1:2, c2:2, c3:2} },
+  { id:"S2", src:"eiwa_nga_manu_rahi.wav", answer:{c1:3, c2:3, c3:3} },
+  { id:"S3", src:"ewhitu_nga_koha_iti.wav",    answer:{c1:4, c2:4, c3:4} },
+  { id:"S4", src:"erima_nga_manu_hou.wav",    answer:{c1:5, c2:5, c3:5} },
+  { id:"S5", src:"erua_nga_pepa_paku.wav",  answer:{c1:6, c2:6, c3:6} },
+  { id:"S6", src:"eiwa_nga_ika_tawa.wav",    answer:{c1:7, c2:7, c3:7} },
+  { id:"S7", src:"erima_nga_waka_paku.wav", answer:{c1:8, c2:8, c3:8} },
+  { id:"S8", src:"erua_nga_pepa_rahi.wav",    answer:{c1:9, c2:9, c3:9} },
+  { id:"S9", src:"ewhitu_nga_hipi_tawa.wav",    answer:{c1:10, c2:10, c3:10} },
+];
+
+/* =================== RENDERING ==================== */
+const gridEl = document.getElementById('grid');
+const counterEl = document.getElementById('counter');
+const nextBtn = document.getElementById('nextBtn');
+const playBtn = document.getElementById('playBtn');
+const barEl = document.getElementById('bar');
+const summaryEl = document.getElementById('summary');
+
+let audio = new Audio();
+audio.preload = "auto";
+let sampleIdx = 0;
+let selection = { c1: null, c2: null, c3: null };
+const results = [];
+
+function makeChoice(col, rowIdx, dimPrefix, blackWord) {
+  const btn = document.createElement('button');
+  btn.className = 'choice';
+  btn.type = 'button';
+  btn.dataset.col = col;
+  btn.dataset.row = rowIdx;
+
+  if (dimPrefix) {
+    const dim = document.createElement('span');
+    dim.className = 'dim';
+    dim.textContent = dimPrefix;
+    btn.appendChild(dim);
+  }
+  const main = document.createElement('span');
+  main.textContent = blackWord;
+  btn.appendChild(main);
+
+  btn.addEventListener('click', () => handlePick(col, rowIdx, btn));
+  return btn;
+}
+
+function renderGrid() {
+  gridEl.innerHTML = '';
+
+  const col1 = document.createElement('div'); col1.className = 'col';
+  col1_numbers.forEach((num, r) => {
+    if (num == null) {
+      const ph = document.createElement('div'); ph.className = 'choice hidden'; col1.appendChild(ph);
+    } else {
+      col1.appendChild(makeChoice('c1', r, 'E', num));
+    }
+  });
+
+  const col2 = document.createElement('div'); col2.className = 'col';
+  col2_nouns.forEach((noun, r) => {
+    col2.appendChild(makeChoice('c2', r, 'ngā', noun));
+  });
+
+  const col3 = document.createElement('div'); col3.className = 'col';
+  col3_adjs.forEach((adj, r) => {
+    if (adj == null) {
+      const ph = document.createElement('div'); ph.className = 'choice hidden'; col3.appendChild(ph);
+    } else {
+      col3.appendChild(makeChoice('c3', r, null, adj));
+    }
+  });
+
+  gridEl.append(col1, col2, col3);
+}
+
+/* ================ INTERACTION ================== */
+function setSelected(col, rowIdx) {
+  gridEl.querySelectorAll(`.choice[data-col="${col}"]`).forEach(el => el.classList.remove('selected'));
+  const btn = gridEl.querySelector(`.choice[data-col="${col}"][data-row="${rowIdx}"]`);
+  if (btn) btn.classList.add('selected');
+}
+
+function handlePick(col, rowIdx) {
+  selection[col] = rowIdx;
+  setSelected(col, rowIdx);
+  validateReady();
+}
+
+function validateReady() {
+  const ready = selection.c1 !== null && selection.c2 !== null && selection.c3 !== null;
+  nextBtn.disabled = !ready;
+  return ready;
+}
+
+function loadSample(i) {
+  const total = samples.length;
+  counterEl.textContent = `Sentence ${i+1} / ${total}`;
+  barEl.style.width = `${(i/total)*100}%`;
+  nextBtn.disabled = true;
+  selection = { c1: null, c2: null, c3: null };
+  gridEl.querySelectorAll('.choice').forEach(el => el.classList.remove('selected'));
+
+  audio.pause();
+  audio.currentTime = 0;
+  audio.src = samples[i].src;
+}
+
+function commitAndNext() {
+  if (!validateReady()) return;
+  const s = samples[sampleIdx];
+  const pick = { ...selection };
+  const correct = s.answer;
+  const isCorrect = (pick.c1 === correct.c1 && pick.c2 === correct.c2 && pick.c3 === correct.c3);
+  results.push({ sampleId: s.id, pick, correct, isCorrect });
+
+  sampleIdx++;
+  if (sampleIdx < samples.length) {
+    loadSample(sampleIdx);
+  } else {
+    finish();
+  }
+}
+
+function finish() {
+  audio.pause();
+  barEl.style.width = '100%';
+  counterEl.textContent = `Kua oti — ${results.filter(r => r.isCorrect).length}/${results.length} tika`;
+  nextBtn.disabled = true;
+  playBtn.disabled = true;
+
+  const lines = [
+    "sampleId,c1_row,c2_row,c3_row,correct_c1,correct_c2,correct_c3,correct?",
+    ...results.map(r => [
+      r.sampleId, r.pick.c1, r.pick.c2, r.pick.c3, r.correct.c1, r.correct.c2, r.correct.c3, r.isCorrect ? "yes" : "no"
+    ].join(","))
+  ];
+  summaryEl.hidden = false;
+  summaryEl.textContent = lines.join("\n");
+}
+
+/* ================ KEYBOARD CONTROL ================= */
+document.addEventListener('keydown', (e) => {
+  if (e.key === ' ' || e.code === 'Space') {
+    e.preventDefault();
+    if (audio.paused) audio.play();
+    else audio.pause();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (!nextBtn.disabled) commitAndNext();
+  }
+});
+
+/* ================ WIRE BUTTONS ==================== */
+playBtn.addEventListener('click', () => {
+  if (audio.paused) audio.play(); else audio.pause();
+});
+nextBtn.addEventListener('click', commitAndNext);
+
+/* ================ INIT ==================== */
+renderGrid();
+loadSample(sampleIdx);
+</script>
+</body>
+</html>
