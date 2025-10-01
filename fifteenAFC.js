@@ -30,6 +30,7 @@
   const settingsHint     = $('#settingsHint');
   const settingsPreview  = $('#settingsPreviewGrid');
   const settingsStatus   = $('#settingsStatus');
+  const trimMsEl        = $('#kupuTrimMs');
 
   // Test DOM
   const gridEl            = $('#grid');
@@ -59,6 +60,7 @@ function getDOMDefaults() {
     randomize:   !!randomizeEl.defaultChecked,
     showProgress:!!showProgressEl.defaultChecked,
     showCorrect: !!showCorrectEl.defaultChecked,
+	trimMs: parseInt(trimMsEl.value,10) || 500,
   };
 }
 
@@ -177,6 +179,12 @@ function shuffle(a) {
   }
   const keiHeaTeURL  = () => `${AUDIO_DIR}/Kei_hea_te_01.mp3`; // fixed version with underscores
   const kupuAudioURL = (kupu) => encodeURL(AUDIO_DIR, kupu, 'mp3');
+  function getTrimMs() {
+  const n = parseInt(trimMsEl && trimMsEl.value, 10);
+  if (!isFinite(n)) return 500;
+  return Math.max(0, Math.min(1000, n));
+}
+
 
   // ===== Geometry / fit =====
   function fitGridToViewport() {
@@ -357,23 +365,42 @@ function shuffle(a) {
   }
 
   // ===== Training (kupu-only) =====
-  async function playKupuOnly(kupu) {
-    stopTrainingAudio();
-    if (AUDIO_CTX) {
-      try {
-        if (AUDIO_CTX.state !== 'running') await AUDIO_CTX.resume();
-        const buf = await getAudioBuffer(kupuAudioURL(kupu));
-        const t0  = AUDIO_CTX.currentTime + 0.02;
-        const src = AUDIO_CTX.createBufferSource();
-        src.buffer = buf; src.connect(AUDIO_CTX.destination);
-        trainingSource = src; src.start(t0);
-        return;
-      } catch {}
-    }
-    trainingAudio = new Audio(kupuAudioURL(kupu));
-    trainingAudio.onended = () => { trainingAudio = null; };
-    trainingAudio.play().catch(()=>{ trainingAudio=null; });
+async function playKupuOnly(kupu) {
+  stopTrainingAudio();
+  const offsetSec = (getTrimMs() || 0) / 1000;
+
+  if (AUDIO_CTX) {
+    try {
+      if (AUDIO_CTX.state !== 'running') await AUDIO_CTX.resume();
+      const buf = await getAudioBuffer(kupuAudioURL(kupu));
+      const safeOffset = Math.min(Math.max(0, offsetSec), Math.max(0, buf.duration - 0.005));
+      const t0  = AUDIO_CTX.currentTime + 0.02;
+      const src = AUDIO_CTX.createBufferSource();
+      src.buffer = buf; src.connect(AUDIO_CTX.destination);
+      trainingSource = src;
+      src.start(t0, safeOffset);
+      return;
+    } catch {}
   }
+
+  // HTMLAudio fallback
+  const a = new Audio(kupuAudioURL(kupu));
+  trainingAudio = a;
+
+  const offset = Math.max(0, offsetSec);
+  const trySeek = () => { try { a.currentTime = offset; } catch {} };
+  const playNow = () => { a.play().catch(()=>{}); };
+
+  if (isFinite(a.duration)) { trySeek(); playNow(); }
+  else {
+    a.addEventListener('loadedmetadata', () => { trySeek(); }, { once: true });
+    a.addEventListener('canplay',        () => { playNow(); }, { once: true });
+    a.load();
+  }
+
+  a.onended = () => { trainingAudio = null; };
+}
+
 
   // ===== Queue =====
   function getRepeatCount() {
@@ -387,56 +414,95 @@ function shuffle(a) {
   }
 
   // ===== Playback (phrase + kupu) =====
-  async function playPromptThenKupu(kupu, onDone) {
-    clearTimersAndAudio();
+async function playPromptThenKupu(kupu, onDone) {
+  clearTimersAndAudio();
 
-    if (AUDIO_CTX) {
-      try {
-        if (AUDIO_CTX.state !== 'running') await AUDIO_CTX.resume();
-        const phraseBuf = await getAudioBuffer(keiHeaTeURL());
-        const kupuBuf   = await getAudioBuffer(kupuAudioURL(kupu));
+  const offsetSec = (getTrimMs() || 0) / 1000;
 
-        const t0 = AUDIO_CTX.currentTime + 0.03;
-        const s1 = AUDIO_CTX.createBufferSource(); s1.buffer = phraseBuf;
-        const s2 = AUDIO_CTX.createBufferSource(); s2.buffer = kupuBuf;
-        s1.connect(AUDIO_CTX.destination);
-        s2.connect(AUDIO_CTX.destination);
-        currentSources = [s1, s2];
+  if (AUDIO_CTX) {
+    try {
+      if (AUDIO_CTX.state !== 'running') await AUDIO_CTX.resume();
+      const phraseBuf = await getAudioBuffer(keiHeaTeURL());
+      const kupuBuf   = await getAudioBuffer(kupuAudioURL(kupu));
 
-        s1.start(t0);
-        s2.start(t0 + phraseBuf.duration);
+      // Clamp offset not to exceed buffer length
+      const safeOffset = Math.min(Math.max(0, offsetSec), Math.max(0, kupuBuf.duration - 0.005));
 
-        const msUntilKupu = Math.max(0, Math.ceil((t0 + phraseBuf.duration - AUDIO_CTX.currentTime) * 1000));
-        kupuOnsetTimer = setTimeout(() => {
-          awaitingResponse = true; trialStartTime = Date.now(); kupuOnsetTimer = null;
-        }, msUntilKupu);
+      const t0 = AUDIO_CTX.currentTime + 0.03;
+      const s1 = AUDIO_CTX.createBufferSource(); s1.buffer = phraseBuf;
+      const s2 = AUDIO_CTX.createBufferSource(); s2.buffer = kupuBuf;
+      s1.connect(AUDIO_CTX.destination);
+      s2.connect(AUDIO_CTX.destination);
+      currentSources = [s1, s2];
 
-        const total = phraseBuf.duration + kupuBuf.duration;
-        playbackDoneTimer = setTimeout(() => {
-          playbackDoneTimer = null; onDone && onDone();
-        }, Math.ceil((t0 + total - AUDIO_CTX.currentTime) * 1000));
-        return;
-      } catch {
-        currentSources = [];
-      }
+      s1.start(t0);
+      // Start kupu AT phrase-end, FROM safeOffset inside the kupu file
+      s2.start(t0 + phraseBuf.duration, safeOffset);
+
+      const msUntilKupu = Math.max(0, Math.ceil((t0 + phraseBuf.duration - AUDIO_CTX.currentTime) * 1000));
+      kupuOnsetTimer = setTimeout(() => {
+        awaitingResponse = true; trialStartTime = Date.now(); kupuOnsetTimer = null;
+      }, msUntilKupu);
+
+      const total = phraseBuf.duration + Math.max(0, kupuBuf.duration - safeOffset);
+      playbackDoneTimer = setTimeout(() => {
+        playbackDoneTimer = null; onDone && onDone();
+      }, Math.ceil((t0 + total - AUDIO_CTX.currentTime) * 1000));
+      return;
+    } catch {
+      currentSources = [];
     }
-
-    // Fallback: HTMLAudio (file:// friendly)
-    htmlAudio1 = new Audio(keiHeaTeURL());
-    htmlAudio1.onended = () => {
-      htmlAudio2 = new Audio(kupuAudioURL(kupu));
-      htmlAudio2.onplay  = () => { awaitingResponse = true; trialStartTime = Date.now(); };
-      htmlAudio2.onended = () => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; };
-      htmlAudio2.play().catch(()=>{ onDone && onDone(); htmlAudio1 = htmlAudio2 = null; });
-    };
-    htmlAudio1.play().catch(() => {
-      // If phrase fails, try kupu alone
-      htmlAudio2 = new Audio(kupuAudioURL(kupu));
-      htmlAudio2.onplay  = () => { awaitingResponse = true; trialStartTime = Date.now(); };
-      htmlAudio2.onended = () => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; };
-      htmlAudio2.play().catch(()=>{ onDone && onDone(); htmlAudio1 = htmlAudio2 = null; });
-    });
   }
+
+  // Fallback: HTMLAudio (file:// friendly)
+  const phrase = new Audio(keiHeaTeURL());
+  htmlAudio1 = phrase;
+
+  phrase.onended = () => {
+    const a = new Audio(kupuAudioURL(kupu));
+    htmlAudio2 = a;
+
+    const playAfterSeek = () => {
+      a.onplay  = () => { awaitingResponse = true; trialStartTime = Date.now(); };
+      a.onended = ()  => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; };
+      a.play().catch(() => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; });
+    };
+
+    // Ensure metadata is ready before seeking
+    const offset = Math.max(0, offsetSec);
+    const trySeek = () => { try { a.currentTime = offset; } catch {} };
+
+    if (isFinite(a.duration)) { trySeek(); playAfterSeek(); }
+    else {
+      a.addEventListener('loadedmetadata', () => { trySeek(); }, { once: true });
+      a.addEventListener('canplay',        () => { playAfterSeek(); }, { once: true });
+      a.load();
+    }
+  };
+
+  phrase.play().catch(() => {
+    // If phrase fails, try kupu alone with seek
+    const a = new Audio(kupuAudioURL(kupu));
+    htmlAudio2 = a;
+
+    const playAfterSeek = () => {
+      a.onplay  = () => { awaitingResponse = true; trialStartTime = Date.now(); };
+      a.onended = ()  => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; };
+      a.play().catch(() => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; });
+    };
+
+    const offset = Math.max(0, offsetSec);
+    const trySeek = () => { try { a.currentTime = offset; } catch {} };
+
+    if (isFinite(a.duration)) { trySeek(); playAfterSeek(); }
+    else {
+      a.addEventListener('loadedmetadata', () => { trySeek(); }, { once: true });
+      a.addEventListener('canplay',        () => { playAfterSeek(); }, { once: true });
+      a.load();
+    }
+  });
+}
+
 
   function clearTimersAndAudio() {
     [playbackDoneTimer, kupuOnsetTimer, isiTimer].forEach(t => t && clearTimeout(t));
@@ -647,6 +713,7 @@ showLabelsEl.checked  = !!S.showLabels;
 randomizeEl.checked   = !!S.randomize;
 showProgressEl.checked= !!S.showProgress;
 showCorrectEl.checked = !!S.showCorrect;
+trimMsEl && (trimMsEl.value = String(S.trimMs ?? FALLBACK_DEFAULTS.trimMs));
 
 
     // Initial view
@@ -676,6 +743,11 @@ showCorrectEl.checked = !!S.showCorrect;
     showCorrectEl.addEventListener('change', () => {
       saveLS({ showCorrect: !!showCorrectEl.checked });
     });
+
+trimMsEl && trimMsEl.addEventListener('change', () => {
+  saveLS({ trimMs: getTrimMs() });
+});
+
 
     // Start / Return
     startOrReturnBtn.addEventListener('click', () => {
