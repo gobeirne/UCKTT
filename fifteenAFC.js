@@ -84,6 +84,15 @@
   const rand = (arr) => arr[Math.floor(Math.random()*arr.length)];
   function encodeURL(dir, filename, ext) { return `${dir}/${encodeURIComponent(filename)}.${ext}`; }
 
+function shuffle(a) {
+  const x = a.slice();
+  for (let i = x.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [x[i], x[j]] = [x[j], x[i]];
+  }
+  return x;
+}
+
   // State
   let lists = [];
   let currentListIdx = 0;
