@@ -48,30 +48,38 @@
   const USE_INLINE_LISTS = location.protocol === 'file:';
 
   // LocalStorage
-  const LS_KEY = 'ktt_settings_v1';
-  const FALLBACK_DEFAULTS = {
+// Use DOM defaults from the HTML as the base
+const LS_KEY = 'ktt_settings_v2'; // bump to avoid old values overriding
+
+function getDOMDefaults() {
+  return {
     listIndex: 0,
-    repeatCount: 3,
-    showLabels: false,
-    randomize: false,
-    showProgress: true,
-    showCorrect: true,
+    repeatCount: parseInt(repeatCountEl.value, 10) || 3,
+    showLabels:  !!showLabelsEl.defaultChecked,
+    randomize:   !!randomizeEl.defaultChecked,
+    showProgress:!!showProgressEl.defaultChecked,
+    showCorrect: !!showCorrectEl.defaultChecked,
   };
-  function loadLS() {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return { ...FALLBACK_DEFAULTS };
-      const obj = JSON.parse(raw);
-      return { ...FALLBACK_DEFAULTS, ...obj };
-    } catch {
-      return { ...FALLBACK_DEFAULTS };
-    }
+}
+
+function loadLS(defaults) {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return { ...defaults };
+    const saved = JSON.parse(raw);
+    // Only override keys that actually exist in storage
+    return { ...defaults, ...saved };
+  } catch {
+    return { ...defaults };
   }
-  function saveLS(partial) {
-    const cur = loadLS();
-    const next = { ...cur, ...partial };
-    localStorage.setItem(LS_KEY, JSON.stringify(next));
-  }
+}
+
+function saveLS(partial) {
+  const cur = loadLS(getDOMDefaults());
+  const next = { ...cur, ...partial };
+  localStorage.setItem(LS_KEY, JSON.stringify(next));
+}
+
 
   // Audio
   const AUDIO_CTX =
@@ -439,6 +447,16 @@ function shuffle(a) {
     if (htmlAudio2) { try{htmlAudio2.pause();}catch{} htmlAudio2 = null; }
     awaitingResponse = false;
   }
+  
+  // Stop any preview/training audio from the settings grid
+function stopTrainingAudio() {
+  try { if (trainingSource) trainingSource.stop(); } catch {}
+  trainingSource = null;
+
+  try { if (trainingAudio) trainingAudio.pause(); } catch {}
+  trainingAudio = null;
+}
+
 
   // ===== Flow =====
   function updateProgressUI() {
@@ -619,14 +637,17 @@ function shuffle(a) {
     });
 
     // Apply saved defaults
-    const S = loadLS();
-    currentListIdx = Math.max(0, Math.min(lists.length - 1, S.listIndex || 0));
-    listSel.value = String(currentListIdx);
-    repeatCountEl.value = String(S.repeatCount || FALLBACK_DEFAULTS.repeatCount);
-    showLabelsEl.checked = !!S.showLabels;
-    randomizeEl.checked  = !!S.randomize;
-    showProgressEl.checked = !!S.showProgress;
-    showCorrectEl.checked  = !!S.showCorrect;
+const DOM_DEFAULTS = getDOMDefaults();
+const S = loadLS(DOM_DEFAULTS);
+
+currentListIdx        = Math.max(0, Math.min(lists.length - 1, S.listIndex || 0));
+listSel.value         = String(currentListIdx);
+repeatCountEl.value   = String(S.repeatCount);
+showLabelsEl.checked  = !!S.showLabels;
+randomizeEl.checked   = !!S.randomize;
+showProgressEl.checked= !!S.showProgress;
+showCorrectEl.checked = !!S.showCorrect;
+
 
     // Initial view
     renderSettingsPreview();
