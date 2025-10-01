@@ -4,10 +4,10 @@ const APP_SHELL = [
   './index.html',
   './fifteenAFC.js',
   './manifest.webmanifest',
-  './Images/thumbs-up.png',
-  './Images/UClogo.png',
-  './icons/icon-192.png',
-  './icons/icon-512.png'
+  './Images/pai.png',
+  './UClogo.png',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 // Try to add optional assets, but don’t fail install if missing
