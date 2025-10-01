@@ -1,19 +1,16 @@
 // fifteenAFC.js — Kendall Toy Test (15 items)
-// Responsive grid fits viewport both horizontally & vertically (5×3 landscape, 3×5 portrait)
-// - Exact filenames preserved (macrons/spaces OK; URLs encoded on load)
+// - Responsive grid fits both axes (5×3 landscape, 3×5 portrait)
+// - Exact filenames (macrons/spaces preserved; encoded on fetch)
 // - Inline TSV on file://; fetch TSV on http/https
-// - Gapless WebAudio “Kei hea te_01” + kupu; fallback to HTMLAudio on file://
+// - Gapless WebAudio “Kei_hea_te_01” + kupu (fallback to HTMLAudio on file://)
 // - Clicks accepted from kupu onset (not during preface)
-// - Settings screen: training taps (kupu-only)
-// - Test screen: ⚙ pause; ✖ quit; Esc=quit; S=pause
-// - Show/hide labels, progress, correct; neutral glow when hidden
-// - Resume after settings changes repaints grid preserving order
-// - End screen thumbs-up + phrase; auto-saves .txt and tells user file name
-
+// - Settings preview is a grid; tap to hear kupu-only (training)
+// - LocalStorage for sticky defaults: list, repeatCount, showLabels, randomize, showProgress, showCorrect
+// - Toolbar: ⚙ pause/return; ✖ quit; Esc=quit; S=pause
+// - End screen uses Images/pai.png + rotating phrase; auto-saves .txt and tells user
 (() => {
   const DEBUG = false;
-  const dbg  = (...a) => { if (DEBUG) console.log('[KTT]', ...a); };
-  const warn = (...a) => console.warn('[KTT]', ...a);
+  const log = (...a) => { if (DEBUG) console.log('[KTT]', ...a); };
 
   const $ = (s) => document.querySelector(s);
 
@@ -42,25 +39,52 @@
   const btnQuitTest       = $('#btnQuitTest');
   const testTopbar        = document.querySelector('.test-topbar') || $('#testTopbar');
 
-  // Paths
+  // Paths / files
   const DATA_URL    = 'kupu_lists.tsv';
   const IMAGE_DIR   = 'Images';
   const AUDIO_DIR   = 'sounds';
-  const SUCCESS_IMG = `${IMAGE_DIR}/pai.png`;
+  const SUCCESS_IMG = `${IMAGE_DIR}/pai.png`;           // ✅ per request
   const END_PHRASES = ['Tau kē koe!','Ki a koe hoki!','Karawhiua!','Koia te hāngaitanga!','Mīharo!'];
-
   const USE_INLINE_LISTS = location.protocol === 'file:';
 
+  // LocalStorage
+  const LS_KEY = 'ktt_settings_v1';
+  const FALLBACK_DEFAULTS = {
+    listIndex: 0,
+    repeatCount: 3,
+    showLabels: false,
+    randomize: false,
+    showProgress: true,
+    showCorrect: true,
+  };
+  function loadLS() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return { ...FALLBACK_DEFAULTS };
+      const obj = JSON.parse(raw);
+      return { ...FALLBACK_DEFAULTS, ...obj };
+    } catch {
+      return { ...FALLBACK_DEFAULTS };
+    }
+  }
+  function saveLS(partial) {
+    const cur = loadLS();
+    const next = { ...cur, ...partial };
+    localStorage.setItem(LS_KEY, JSON.stringify(next));
+  }
+
+  // Audio
   const AUDIO_CTX =
     (location.protocol !== 'file:' && (window.AudioContext || window.webkitAudioContext))
       ? new (window.AudioContext || window.webkitAudioContext)()
       : null;
   const audioBufferCache = new Map();
-
-  // /a/, /ā/, /ai/, /au/, /ae/, etc.
   const PHONEME_RE = /^\/[a-zāēīōū]{1,3}\/$/i;
+  const isLandscape = () => window.innerWidth >= window.innerHeight;
+  const rand = (arr) => arr[Math.floor(Math.random()*arr.length)];
+  function encodeURL(dir, filename, ext) { return `${dir}/${encodeURIComponent(filename)}.${ext}`; }
 
-  // -------- State --------
+  // State
   let lists = [];
   let currentListIdx = 0;
   let gridOrder = [];
@@ -69,7 +93,6 @@
   let currentTarget = null;
   let awaitingResponse = false;
   let trialStartTime = null;
-  let playing = false;
   let score = 0;
   let results = [];
   let testInProgress = false;
@@ -81,27 +104,7 @@
   let currentSources = [];
   let trainingSource = null, trainingAudio = null;
 
-  // -------- Utils --------
-  const isLandscape = () => window.innerWidth >= window.innerHeight;
-  const randChoice  = (arr) => arr[Math.floor(Math.random()*arr.length)];
-  function encodeURL(dir, filename, ext) { return `${dir}/${encodeURIComponent(filename)}.${ext}`; }
-  function shuffle(a){ const x=a.slice(); for(let i=x.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[x[i],x[j]]=[x[j],x[i]];} return x; }
-
-  function clearTimersAndAudio() {
-    [playbackDoneTimer, kupuOnsetTimer, isiTimer].forEach(t => t && clearTimeout(t));
-    playbackDoneTimer = kupuOnsetTimer = isiTimer = null;
-    currentSources.forEach(s => { try{s.stop();}catch{} });
-    currentSources = [];
-    if (htmlAudio1) { try{htmlAudio1.pause();}catch{} htmlAudio1=null; }
-    if (htmlAudio2) { try{htmlAudio2.pause();}catch{} htmlAudio2=null; }
-    playing=false; awaitingResponse=false;
-  }
-  function stopTrainingAudio() {
-    if (trainingSource) { try{trainingSource.stop();}catch{} trainingSource=null; }
-    if (trainingAudio)  { try{trainingAudio.pause();}catch{} trainingAudio=null; }
-  }
-
-  // -------- Lists --------
+  // ===== Lists =====
   function parseLineToKupu(line) {
     const raw  = line.trim().split(/\t| {2,}|\s{1,}/).filter(Boolean);
     const kupu = raw.filter(tok => !PHONEME_RE.test(tok));
@@ -125,7 +128,7 @@
           const parsed = parseTextToLists(t);
           if (parsed.length) return parsed;
         }
-      } catch(_) {}
+      } catch {}
       throw new Error('Could not load lists from inline block (and fetch blocked on file://).');
     } else {
       try {
@@ -135,7 +138,7 @@
           const parsed = parseTextToLists(t);
           if (parsed.length) return parsed;
         }
-      } catch(e){ warn('fetch failed',e); }
+      } catch {}
       const node = document.getElementById('kupu-lists');
       if (node && node.textContent.trim()) {
         const parsed = parseTextToLists(node.textContent);
@@ -145,7 +148,7 @@
     }
   }
 
-  // -------- Audio --------
+  // ===== Audio helpers =====
   async function getAudioBuffer(url) {
     if (audioBufferCache.has(url)) return audioBufferCache.get(url);
     const res = await fetch(url, { cache: 'no-store' });
@@ -155,43 +158,60 @@
     audioBufferCache.set(url, buf);
     return buf;
   }
-  const keiHeaTeURL  = () => `${AUDIO_DIR}/Kei_hea_te_01.mp3`; // fixed version
+  const keiHeaTeURL  = () => `${AUDIO_DIR}/Kei_hea_te_01.mp3`; // fixed version with underscores
   const kupuAudioURL = (kupu) => encodeURL(AUDIO_DIR, kupu, 'mp3');
 
-  // -------- Responsive sizing: scale grid to viewport (both axes) --------
+  // ===== Geometry / fit =====
   function fitGridToViewport() {
     if (!gridEl || !testView.classList.contains('active')) return;
-
-    // Desired geometry
     const cols = isLandscape() ? 5 : 3;
     const rows = isLandscape() ? 3 : 5;
 
-    // Available width = grid content box width
-    // Available height = viewport bottom minus grid's top minus testView bottom padding
-    const gridCS = getComputedStyle(gridEl);
-    const gap = parseFloat(gridCS.gap) || 14;
+    // CSS assists
+    gridEl.style.display = 'grid';
+    gridEl.style.justifyContent = 'center';
+    gridEl.style.alignContent = 'start'; // avoid extra vertical gaps on phones
 
-    const tvRect = testView.getBoundingClientRect();
+    const styles = getComputedStyle(gridEl);
+    const gap = parseFloat(styles.gap) || 14;
+
     const tvCS = getComputedStyle(testView);
     const padBottom = parseFloat(tvCS.paddingBottom) || 0;
-
     const gridTop = gridEl.getBoundingClientRect().top;
     const vw = document.documentElement.clientWidth;
     const vh = window.visualViewport ? Math.floor(window.visualViewport.height) : window.innerHeight;
 
     const availW = gridEl.clientWidth || (vw - 32);
-    const availH = Math.max(0, vh - (gridTop) - padBottom);
+    const availH = Math.max(0, vh - gridTop - padBottom);
 
     const sizeW = (availW - gap * (cols - 1)) / cols;
     const sizeH = (availH - gap * (rows - 1)) / rows;
-    const cell = Math.floor(Math.max(60, Math.min(sizeW, sizeH)));
 
-    // Apply fixed columns of that cell size (square via img aspect-ratio)
+    const cell = Math.max(60, Math.floor(Math.min(sizeW, sizeH)) - 2); // small fudge avoids wrap/overlap
+
     gridEl.style.gridTemplateColumns = `repeat(${cols}, ${cell}px)`;
-    gridEl.querySelectorAll('.cell').forEach(c => { c.style.width = `${cell}px`; });
+    gridEl.querySelectorAll('.cell').forEach(c => {
+      c.style.width = `${cell}px`;
+      c.style.boxSizing = 'border-box'; // ensure borders included
+    });
   }
 
-  // -------- Views --------
+  function fitPreviewToViewport() {
+    if (!settingsView.classList.contains('active')) return;
+    const cols = isLandscape() ? 5 : 3;
+    settingsPreview.style.display = 'grid';
+    settingsPreview.style.justifyContent = 'center';
+    settingsPreview.style.alignContent = 'start';
+    const gap = 14;
+    const availW = settingsPreview.clientWidth || (document.documentElement.clientWidth - 32);
+    const sizeW = (availW - gap * (cols - 1)) / cols;
+    const cell  = Math.max(80, Math.floor(sizeW) - 2);
+    settingsPreview.style.setProperty('--cell', `${cell}px`);
+    settingsPreview.classList.toggle('landscape', isLandscape());
+    settingsPreview.classList.toggle('portrait',  !isLandscape());
+  }
+
+  // ===== View helpers =====
   function showSettings() {
     settingsView.classList.add('active');
     testView.classList.remove('active');
@@ -200,27 +220,25 @@
       ? 'Test paused. Adjust display options, then return.'
       : 'Tap an image to hear its kupu.';
     renderSettingsPreview();
+    requestAnimationFrame(fitPreviewToViewport);
   }
   function showTest() {
     settingsView.classList.remove('active');
     testView.classList.add('active');
     ensureTopbarOnTop();
     stopTrainingAudio();
-    // Fit after DOM is visible
     requestAnimationFrame(fitGridToViewport);
   }
   function ensureTopbarOnTop() {
     if (!testTopbar) return;
     Object.assign(testTopbar.style, {
       position:'fixed', top:'8px', right:'16px', zIndex:'2147483647',
-      pointerEvents:'auto', display:'flex', gap:'10px',
-      background:'rgba(255,255,255,0.85)', backdropFilter:'blur(6px)',
-      padding:'6px', borderRadius:'10px', border:'1px solid #ccc'
+      pointerEvents:'auto'
     });
-    [btnToSettings, btnQuitTest].forEach(b=> b && Object.assign(b.style,{pointerEvents:'auto', zIndex:'2147483647'}));
+    [btnToSettings, btnQuitTest].forEach(b=> b && Object.assign(b.style,{pointerEvents:'auto'}));
   }
 
-  // -------- Grid render --------
+  // ===== Renderers =====
   function renderGrid(kupu15) {
     gridEl.innerHTML = '';
     statusEl.textContent = '';
@@ -233,6 +251,7 @@
       const cell = document.createElement('div');
       cell.className = 'cell';
       cell.tabIndex = 0;
+      cell.style.boxSizing = 'border-box';
 
       const img = document.createElement('img');
       img.className = 'thumb';
@@ -261,6 +280,7 @@
       const cell = document.createElement('div');
       cell.className = 'cell';
       cell.tabIndex = 0;
+      cell.style.boxSizing = 'border-box';
 
       const img = document.createElement('img');
       img.className = 'thumb';
@@ -278,7 +298,6 @@
       cell.addEventListener('click', () => handleResponse(kupu));
       gridEl.appendChild(cell);
     });
-
     fitGridToViewport();
   }
 
@@ -289,7 +308,6 @@
     updateProgressUI();
   }
 
-  // Settings preview (training taps)
   function renderSettingsPreview() {
     settingsPreview.innerHTML = '';
     const kupu15 = lists[currentListIdx];
@@ -298,6 +316,8 @@
     items.forEach(kupu => {
       const cell = document.createElement('div');
       cell.className = 'cell';
+      cell.style.width = 'var(--cell, 120px)';
+      cell.style.boxSizing = 'border-box';
 
       const img = document.createElement('img');
       img.className = 'thumb';
@@ -312,14 +332,14 @@
 
       cell.appendChild(img);
       cell.appendChild(label);
-
-      cell.addEventListener('click', () => playKupuOnly(kupu));
+      cell.addEventListener('click', () => playKupuOnly(kupu)); // training
       settingsPreview.appendChild(cell);
     });
     settingsStatus.textContent = '';
+    fitPreviewToViewport();
   }
 
-  // -------- Training playback (kupu only) --------
+  // ===== Training (kupu-only) =====
   async function playKupuOnly(kupu) {
     stopTrainingAudio();
     if (AUDIO_CTX) {
@@ -331,14 +351,14 @@
         src.buffer = buf; src.connect(AUDIO_CTX.destination);
         trainingSource = src; src.start(t0);
         return;
-      } catch(e){ warn('training WebAudio failed; fallback to HTMLAudio', e); }
+      } catch {}
     }
     trainingAudio = new Audio(kupuAudioURL(kupu));
     trainingAudio.onended = () => { trainingAudio = null; };
     trainingAudio.play().catch(()=>{ trainingAudio=null; });
   }
 
-  // -------- Test queue --------
+  // ===== Queue =====
   function getRepeatCount() {
     const n = parseInt(repeatCountEl.value, 10);
     return isFinite(n) && n >= 1 && n <= 10 ? n : 3;
@@ -349,7 +369,7 @@
     return shuffle(q);
   }
 
-  // -------- Trial playback --------
+  // ===== Playback (phrase + kupu) =====
   async function playPromptThenKupu(kupu, onDone) {
     clearTimersAndAudio();
 
@@ -364,7 +384,7 @@
         const s2 = AUDIO_CTX.createBufferSource(); s2.buffer = kupuBuf;
         s1.connect(AUDIO_CTX.destination);
         s2.connect(AUDIO_CTX.destination);
-        currentSources = [s1, s2]; playing = true;
+        currentSources = [s1, s2];
 
         s1.start(t0);
         s2.start(t0 + phraseBuf.duration);
@@ -376,30 +396,42 @@
 
         const total = phraseBuf.duration + kupuBuf.duration;
         playbackDoneTimer = setTimeout(() => {
-          playing = false; playbackDoneTimer = null; onDone && onDone();
+          playbackDoneTimer = null; onDone && onDone();
         }, Math.ceil((t0 + total - AUDIO_CTX.currentTime) * 1000));
         return;
-      } catch(e){ warn('WebAudio failed; fallback to HTMLAudio', e); currentSources=[]; }
+      } catch {
+        currentSources = [];
+      }
     }
 
-    // Fallback
-    playing = true;
+    // Fallback: HTMLAudio (file:// friendly)
     htmlAudio1 = new Audio(keiHeaTeURL());
     htmlAudio1.onended = () => {
       htmlAudio2 = new Audio(kupuAudioURL(kupu));
       htmlAudio2.onplay  = () => { awaitingResponse = true; trialStartTime = Date.now(); };
-      htmlAudio2.onended = () => { playing=false; htmlAudio1=htmlAudio2=null; onDone && onDone(); };
-      htmlAudio2.play().catch(()=>{ playing=false; htmlAudio1=htmlAudio2=null; onDone && onDone(); });
+      htmlAudio2.onended = () => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; };
+      htmlAudio2.play().catch(()=>{ onDone && onDone(); htmlAudio1 = htmlAudio2 = null; });
     };
     htmlAudio1.play().catch(() => {
+      // If phrase fails, try kupu alone
       htmlAudio2 = new Audio(kupuAudioURL(kupu));
       htmlAudio2.onplay  = () => { awaitingResponse = true; trialStartTime = Date.now(); };
-      htmlAudio2.onended = () => { playing=false; htmlAudio1=htmlAudio2=null; onDone && onDone(); };
-      htmlAudio2.play().catch(()=>{ playing=false; htmlAudio1=htmlAudio2=null; onDone && onDone(); });
+      htmlAudio2.onended = () => { onDone && onDone(); htmlAudio1 = htmlAudio2 = null; };
+      htmlAudio2.play().catch(()=>{ onDone && onDone(); htmlAudio1 = htmlAudio2 = null; });
     });
   }
 
-  // -------- Flow --------
+  function clearTimersAndAudio() {
+    [playbackDoneTimer, kupuOnsetTimer, isiTimer].forEach(t => t && clearTimeout(t));
+    playbackDoneTimer = kupuOnsetTimer = isiTimer = null;
+    currentSources.forEach(s => { try{s.stop();}catch{} });
+    currentSources = [];
+    if (htmlAudio1) { try{htmlAudio1.pause();}catch{} htmlAudio1 = null; }
+    if (htmlAudio2) { try{htmlAudio2.pause();}catch{} htmlAudio2 = null; }
+    awaitingResponse = false;
+  }
+
+  // ===== Flow =====
   function updateProgressUI() {
     const showProg = showProgressEl && showProgressEl.checked;
     const t = `Trial ${trialIndex + 1} / ${testQueue.length} • Score: ${score}`;
@@ -408,6 +440,16 @@
   }
 
   function startTest() {
+    // Save current settings to LS before starting
+    saveLS({
+      listIndex: parseInt(listSel.value, 10) || 0,
+      repeatCount: getRepeatCount(),
+      showLabels: !!showLabelsEl.checked,
+      randomize:  !!randomizeEl.checked,
+      showProgress: !!showProgressEl.checked,
+      showCorrect:  !!showCorrectEl.checked
+    });
+
     currentListIdx = parseInt(listSel.value, 10) || 0;
     const kupu15 = lists[currentListIdx];
     const repeatCount = getRepeatCount();
@@ -415,7 +457,7 @@
     testQueue = buildTestQueue(kupu15, repeatCount);
     trialIndex = 0; score = 0; results = [];
     testInProgress = true; testPaused = false;
-    downloadBtn && (downloadBtn.disabled = true);
+    if (downloadBtn) downloadBtn.disabled = true;
 
     if (AUDIO_CTX && AUDIO_CTX.state !== 'running') AUDIO_CTX.resume().catch(()=>{});
     showTest();
@@ -443,13 +485,13 @@
       endTestScreen();
       testInProgress = false;
       startOrReturnBtn.textContent = 'Start test';
-      downloadBtn && (downloadBtn.disabled = false);
+      if (downloadBtn) downloadBtn.disabled = false;
       return;
     }
     currentTarget = testQueue[trialIndex];
     const showProg = showProgressEl && showProgressEl.checked;
     statusEl.textContent = showProg ? `Trial ${trialIndex + 1} / ${testQueue.length}` : '';
-    awaitingResponse = false; trialStartTime = null;
+    trialStartTime = null; awaitingResponse = false;
     playPromptThenKupu(currentTarget, () => {});
   }
 
@@ -472,6 +514,7 @@
       clicked.classList.remove('correct','incorrect','neutral');
       clicked.classList.add(showCorr ? (ok ? 'correct' : 'incorrect') : 'neutral');
     }
+
     if (showCorr) {
       statusEl.textContent = ok ? '✅ Correct' : `✖️ Incorrect (was ${currentTarget})`;
     } else if (showProgressEl && showProgressEl.checked) {
@@ -489,7 +532,7 @@
     }, 1000);
   }
 
-  // -------- End & export --------
+  // ===== End & export =====
   function downloadResults(autoNoteEl) {
     if (!results.length) return null;
     const header = ['trial','list','target','response','correct','rt_ms','ts_iso'].join('\t')+'\n';
@@ -511,10 +554,10 @@
       gap:'20px', padding:'24px', textAlign:'center', zIndex:'3000', cursor:'pointer'
     });
     const img = document.createElement('img');
-    img.src = SUCCESS_IMG; img.alt = 'Thumbs up';
+    img.src = SUCCESS_IMG; img.alt = 'Pai!';
     Object.assign(img.style,{maxWidth:'70vw', maxHeight:'50vh', objectFit:'contain'});
     const phrase = document.createElement('div');
-    phrase.textContent = randChoice(END_PHRASES);
+    phrase.textContent = rand(END_PHRASES);
     Object.assign(phrase.style,{fontSize:'clamp(1.6rem,4vw,2.4rem)', fontWeight:'700'});
     const note = document.createElement('div');
     Object.assign(note.style,{fontSize:'clamp(0.9rem,2.2vw,1.05rem)', color:'#444'});
@@ -527,7 +570,7 @@
     overlay.addEventListener('click', () => { overlay.remove(); quitTest(); });
   }
 
-  // -------- Hotkeys & toolbar --------
+  // ===== Hotkeys & toolbar =====
   function handleHotkeys(e) {
     const tag = (e.target && e.target.tagName || '').toLowerCase();
     if (['input','select','textarea'].includes(tag)) return;
@@ -547,43 +590,9 @@
     btnToSettings && btnToSettings.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); pauseToSettings(); });
   }
 
-function enableVerboseWiring() {
-  const toName = (el) => {
-    if (!el) return '(none)';
-    if (el.id) return `#${el.id}`;
-    if (el.className) return `${el.tagName.toLowerCase()}.${String(el.className).split(' ').join('.')}`;
-    return el.tagName.toLowerCase();
-  };
-
-  console.log('[KTT VERBOSE] wiring:',
-    { settingsView: !!document.querySelector('#settingsView'),
-      testView: !!document.querySelector('#testView'),
-      startOrReturnBtn: !!document.querySelector('#startOrReturnBtn'),
-      btnQuitTest: !!document.querySelector('#btnQuitTest'),
-      btnToSettingsPaused: !!document.querySelector('#btnToSettingsPaused') });
-
-  document.addEventListener('click', (e) => {
-    const t = e.target;
-    const hitQuit = t.closest && t.closest('#btnQuitTest');
-    const hitGear = t.closest && t.closest('#btnToSettingsPaused');
-    const hitStart = t.closest && t.closest('#startOrReturnBtn');
-    if (hitQuit)  console.log('[KTT VERBOSE] click → quit', toName(t));
-    if (hitGear)  console.log('[KTT VERBOSE] click → settings/pause', toName(t));
-    if (hitStart) console.log('[KTT VERBOSE] click → start/return', toName(t));
-  }, true);
-
-  window.addEventListener('keydown', (e) => {
-    if (['Escape','s','S'].includes(e.key)) {
-      console.log('[KTT VERBOSE] keydown', e.key, { testInProgress, testPaused });
-    }
-  }, true);
-}
-// in init():
-// enableVerboseWiring();
-
-
-  // -------- Init --------
+  // ===== Init =====
   async function init() {
+    // Load lists
     try {
       lists = await loadLists();
     } catch (e) {
@@ -591,6 +600,7 @@ function enableVerboseWiring() {
       return;
     }
 
+    // Populate list selector
     listSel.innerHTML = '';
     lists.forEach((_, idx) => {
       const opt = document.createElement('option');
@@ -598,28 +608,51 @@ function enableVerboseWiring() {
       opt.textContent = `List ${idx + 1}`;
       listSel.appendChild(opt);
     });
-    currentListIdx = 0;
 
+    // Apply saved defaults
+    const S = loadLS();
+    currentListIdx = Math.max(0, Math.min(lists.length - 1, S.listIndex || 0));
+    listSel.value = String(currentListIdx);
+    repeatCountEl.value = String(S.repeatCount || FALLBACK_DEFAULTS.repeatCount);
+    showLabelsEl.checked = !!S.showLabels;
+    randomizeEl.checked  = !!S.randomize;
+    showProgressEl.checked = !!S.showProgress;
+    showCorrectEl.checked  = !!S.showCorrect;
+
+    // Initial view
     renderSettingsPreview();
     showSettings();
-	enableVerboseWiring();
 
-    // Settings handlers
+    // Settings handlers (persist to LS)
     listSel.addEventListener('change', () => {
       currentListIdx = parseInt(listSel.value, 10) || 0;
+      saveLS({ listIndex: currentListIdx });
       renderSettingsPreview();
     });
-    showLabelsEl.addEventListener('change', renderSettingsPreview);
-    randomizeEl.addEventListener('change', renderSettingsPreview);
-    repeatCountEl.addEventListener('change', () => {});
-    showProgressEl.addEventListener('change', () => {});
-    showCorrectEl.addEventListener('change', () => {});
+    repeatCountEl.addEventListener('change', () => {
+      saveLS({ repeatCount: getRepeatCount() });
+    });
+    showLabelsEl.addEventListener('change', () => {
+      saveLS({ showLabels: !!showLabelsEl.checked });
+      renderSettingsPreview();
+    });
+    randomizeEl.addEventListener('change', () => {
+      saveLS({ randomize: !!randomizeEl.checked });
+      renderSettingsPreview();
+    });
+    showProgressEl.addEventListener('change', () => {
+      saveLS({ showProgress: !!showProgressEl.checked });
+    });
+    showCorrectEl.addEventListener('change', () => {
+      saveLS({ showCorrect: !!showCorrectEl.checked });
+    });
 
     // Start / Return
     startOrReturnBtn.addEventListener('click', () => {
       if (testInProgress && testPaused) {
-        testPaused = false; showTest();
-        repaintGridPreservingOrder();     // no reorder
+        testPaused = false;
+        showTest();
+        repaintGridPreservingOrder();
         applyDisplayOptionsToExistingGrid();
         updateProgressUI();
         nextTrial();
@@ -630,16 +663,24 @@ function enableVerboseWiring() {
       }
     });
 
+    // Manual download
     downloadBtn && downloadBtn.addEventListener('click', () => downloadResults());
 
+    // Toolbar & hotkeys
     bindToolbarDirect();
     bindToolbarDelegation();
     ensureTopbarOnTop();
 
-    // Fit grid whenever viewport changes (rotate, iOS URL bar, etc.)
-    window.addEventListener('resize', () => { if (testView.classList.contains('active')) fitGridToViewport(); });
+    // Responsive fits
+    window.addEventListener('resize', () => {
+      if (testView.classList.contains('active')) fitGridToViewport();
+      if (settingsView.classList.contains('active')) fitPreviewToViewport();
+    });
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', () => { if (testView.classList.contains('active')) fitGridToViewport(); });
+      window.visualViewport.addEventListener('resize', () => {
+        if (testView.classList.contains('active')) fitGridToViewport();
+        if (settingsView.classList.contains('active')) fitPreviewToViewport();
+      });
     }
     window.addEventListener('keydown', handleHotkeys, true);
 
