@@ -76,9 +76,11 @@
   };
 
   // ─── State ─────────────────────────────────────────────────────────────────
-  let selected = new Set();   // words explicitly chosen by clinician
+  let selected = new Set();
   let listName = '';
-  let editingId = null;       // null = new, string = editing existing
+  let editingId   = null;       // null = new, string = editing existing custom list
+  let isBuiltin   = false;      // true when viewing an Isiah/builtin list
+  let originalKupu = [];        // snapshot of kupu on open — to detect changes
   let onSaveCallback = null;
   let overlayEl = null;
 
@@ -204,14 +206,18 @@
     overlay.id = 'lb-overlay';
     overlay.className = 'lb-overlay';
 
+    const title = isBuiltin
+      ? `Viewing ${listName.replace(' (copy)', '')} — save as new list to keep changes`
+      : editingId ? 'Edit list' : 'Build a custom test list';
+
     overlay.innerHTML = `
       <div class="lb-modal">
-
-        <!-- Header -->
         <div class="lb-modal-header">
           <div>
-            <div class="lb-modal-title">${editingId ? 'Edit list' : 'Build a custom test list'}</div>
-            <div class="lb-modal-sub">Select kupu — minimal pairs are suggested automatically</div>
+            <div class="lb-modal-title">${title}</div>
+            <div class="lb-modal-sub">${isBuiltin
+              ? '🔒 Built-in list — any changes will be saved as a new custom list'
+              : 'Select kupu — minimal pairs are suggested automatically'}</div>
           </div>
           <button class="lb-close-btn" id="lb-close">✕</button>
         </div>
@@ -262,7 +268,7 @@
             <div class="lb-footer">
               <div class="lb-footer-btns">
                 <button class="lb-btn" id="lb-clear-btn">Clear</button>
-                <button class="lb-btn lb-btn-primary" id="lb-save-btn">Save list</button>
+                <button class="lb-btn lb-btn-primary" id="lb-save-btn">${isBuiltin ? 'Save as new list' : 'Save list'}</button>
               </div>
               <div class="lb-proceed-note" id="lb-proceed-note" style="display:none">
                 <a class="lb-proceed-link" id="lb-proceed-link" href="#">
@@ -341,34 +347,42 @@
     if (!name) {
       overlayEl.querySelector('#lb-name-input').focus();
       overlayEl.querySelector('#lb-name-input').style.borderColor = '#d94040';
-      setTimeout(() => {
-        if (overlayEl) overlayEl.querySelector('#lb-name-input').style.borderColor = '';
-      }, 1500);
+      setTimeout(() => { if (overlayEl) overlayEl.querySelector('#lb-name-input').style.borderColor = ''; }, 1500);
       return;
     }
-    if (selected.size === 0) {
-      alert('Please add at least one kupu.');
-      return;
-    }
+    if (selected.size === 0) { alert('Please add at least one kupu.'); return; }
     if (!force && selected.size !== TARGET) {
-      // Show proceed note; let user click it if they want
       const proc = overlayEl.querySelector('#lb-proceed-note');
-      if (proc) {
-        proc.style.display = 'block';
-        proc.querySelector('a').style.fontWeight = '700';
+      if (proc) { proc.style.display = 'block'; proc.querySelector('a').style.fontWeight = '700'; }
+    }
+
+    // For builtin lists, always create a new custom list — never overwrite
+    // For custom lists, check if anything actually changed — if not, just close
+    if (!isBuiltin && editingId) {
+      const currentKupu = Array.from(selected).sort().join(',');
+      const origKupu    = [...originalKupu].sort().join(',');
+      const origName    = (() => {
+        const lists = loadCustomLists();
+        return lists.find(l => l.id === editingId)?.name || '';
+      })();
+      if (currentKupu === origKupu && name === origName) {
+        // Nothing changed — just close
+        close();
+        return;
       }
-      // Flash the proceed note rather than blocking
     }
 
     const existing = loadCustomLists();
     const kupu = Array.from(selected);
-    const now = Date.now();
+    const now  = Date.now();
 
-    if (editingId) {
+    if (!isBuiltin && editingId) {
+      // Update existing custom list
       const idx = existing.findIndex(l => l.id === editingId);
       if (idx >= 0) existing[idx] = { ...existing[idx], name, kupu, updatedAt: now };
       else existing.unshift({ id: editingId, name, kupu, builtin: false, createdAt: now });
     } else {
+      // New custom list (either fresh, or saved copy of a builtin)
       const id = 'custom_' + now + '_' + Math.random().toString(36).slice(2, 7);
       existing.unshift({ id, name, kupu, builtin: false, createdAt: now });
     }
@@ -379,19 +393,32 @@
   }
 
   // ─── Open / Close ──────────────────────────────────────────────────────────
-  function open(listId, callback) {
+  // listId   — custom list ID to edit, OR null for new
+  // callback — called after save
+  // builtinList — { id, name, kupu } passed directly for Isiah/builtin lists
+  function open(listId, callback, builtinList) {
     onSaveCallback = callback || null;
-    editingId = listId || null;
+    editingId  = null;
+    isBuiltin  = false;
     selected.clear();
     listName = '';
+    originalKupu = [];
 
-    // If editing, load existing data
-    if (editingId) {
+    if (builtinList) {
+      // Viewing a builtin — pre-populate but never save back to it
+      isBuiltin = true;
+      listName  = builtinList.name + ' (copy)';
+      (builtinList.kupu || []).forEach(w => selected.add(w));
+      originalKupu = [...selected];
+    } else if (listId) {
+      // Editing a custom list
+      editingId = listId;
       const lists = loadCustomLists();
-      const existing = lists.find(l => l.id === editingId);
+      const existing = lists.find(l => l.id === listId);
       if (existing) {
         listName = existing.name;
         (existing.kupu || []).forEach(w => selected.add(w));
+        originalKupu = [...selected];
       }
     }
 
@@ -400,7 +427,6 @@
     wireEvents();
     renderAll();
 
-    // Trap focus in modal (basic)
     setTimeout(() => {
       const nameInp = overlayEl.querySelector('#lb-name-input');
       if (nameInp && !listName) nameInp.focus();

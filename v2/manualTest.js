@@ -152,16 +152,16 @@
     const btn = document.getElementById('mt-play-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Playing…'; }
 
-    // Tell responder (if paired) — responder plays if audioFromResponder
+    // Tell responder (if paired)
     if (window.kttPaired?.isConnected()) {
       window.kttPaired.sendPlay(kupu, currentLevel);
     }
 
     refreshScoringTable();
 
-    // Play on this device unless responder is handling audio
+    // Use the API — not a DOM query — to decide who plays audio
     const responderPlays = window.kttPaired?.isConnected() &&
-      document.querySelector('.mt-audio-src-btn:last-child.on');
+                           window.kttPaired.getAudioFromResponder();
 
     if (!responderPlays) {
       carrierAudio = new Audio(CARRIER_URL);
@@ -307,11 +307,22 @@
         onclick: () => {
           activeListId = list.id;
           saveSettings({ activeListId });
-          // If paired, tell responder to go back to waiting — new list not started yet
-          if (window.kttPaired?.isConnected()) {
-            window.kttPaired.sendListReset(list.name);
-          }
+          if (window.kttPaired?.isConnected()) window.kttPaired.sendListReset(list.name);
           renderSetupScreen();
+        },
+        ondblclick: (e) => {
+          e.stopPropagation();
+          if (list.builtin) {
+            // Open builtin in builder for viewing/copying
+            if (window.kttListBuilder) {
+              window.kttListBuilder.open(null,
+                () => { rebuildAllLists(); renderSetupScreen(); },
+                list   // pass full builtin list object
+              );
+            }
+          } else {
+            openListBuilder(list.id);
+          }
         }
       });
       const dot  = el('div', { cls: 'mt-list-dot ' + (list.builtin ? 'builtin' : 'custom') });
@@ -337,6 +348,8 @@
             renderSetupScreen();
           }
         }, '✕'));
+      } else {
+        item.title = 'Double-click to view or copy this list';
       }
       return item;
     }
@@ -555,7 +568,13 @@
     const labelToggle = el('label', { cls: 'mt-label-toggle', title: 'Show kupu text labels' });
     const labelCb = el('input', { type: 'checkbox' });
     labelCb.checked = showLabels;
-    labelCb.onchange = () => { showLabels = labelCb.checked; saveSettings({ showLabels }); refreshScoringTable(); };
+    labelCb.onchange = () => {
+      showLabels = labelCb.checked;
+      saveSettings({ showLabels });
+      refreshScoringTable();
+      // Propagate to responder
+      if (window.kttPaired?.isConnected()) window.kttPaired.sendDisplay(showLabels);
+    };
     labelToggle.append(labelCb, ' labels');
     infoBar.appendChild(labelToggle);
 
@@ -565,9 +584,11 @@
     // Audio source toggle (only visible when paired)
     if (window.kttPaired?.isConnected()) {
       const audioSeg = el('div', { cls: 'mt-audio-src-seg', style: 'width:auto;margin-left:4px' });
+      const currentlyResponder = window.kttPaired.getAudioFromResponder();
       ['This device', "Child's device"].forEach((lbl, i) => {
-        const src = i === 0 ? 'controller' : 'responder';
-        const btn = el('button', { cls: 'mt-audio-src-btn' + (i === 0 ? ' on' : ''),
+        const src      = i === 0 ? 'controller' : 'responder';
+        const isActive = i === 0 ? !currentlyResponder : currentlyResponder;
+        const btn = el('button', { cls: 'mt-audio-src-btn' + (isActive ? ' on' : ''),
           onclick: (e) => {
             audioSeg.querySelectorAll('.mt-audio-src-btn').forEach(b => b.classList.remove('on'));
             e.target.classList.add('on');
@@ -851,7 +872,30 @@
     return getActiveList();
   }
 
-  // ─── Arm kupu ─────────────────────────────────────────────────────────────
+  function onPairReady() {
+    // Responder has tapped "Tap here to commence" — enable Play
+    const btn = document.getElementById('mt-play-btn');
+    if (btn && armedKupu) btn.disabled = false;
+    // Update status badge
+    const badge = document.getElementById('ktt-pair-status');
+    if (badge) {
+      badge.textContent = '🔒 Paired · ready';
+      badge.style.cssText = 'display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7';
+    }
+  }
+
+  function onPairResponderWaiting() {
+    // Responder disconnected or went to a new list — disable Play if responder audio
+    if (window.kttPaired?.getAudioFromResponder()) {
+      const btn = document.getElementById('mt-play-btn');
+      if (btn) { btn.disabled = true; }
+    }
+    const badge = document.getElementById('ktt-pair-status');
+    if (badge) {
+      badge.textContent = '🔒 Paired · waiting';
+      badge.style.cssText = 'display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:#fff8e1;color:#e65100;border:1px solid #ffcc80';
+    }
+  }
 
   function armKupu(kupu) {
     armedKupu = armedKupu === kupu ? null : kupu;
@@ -1448,6 +1492,7 @@ ${lvls.length ? `
   document.addEventListener('DOMContentLoaded', init);
 
   window.kttManual = { rebuildAllLists, renderSetupScreen, showView,
-    onPairResponse, getActiveListForPair };
+    onPairResponse, onPairReady, onPairResponderWaiting,
+    getActiveListForPair, getShowLabels: () => showLabels };
 
 })();

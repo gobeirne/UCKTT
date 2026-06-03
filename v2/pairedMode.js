@@ -7,49 +7,82 @@
 
   const AUDIO_DIR   = 'sounds';
   const CARRIER_URL = `${AUDIO_DIR}/keiheate.mp3`;
-  // Max bytes per image chunk over data channel (WebRTC max msg ~256 KB, stay safe)
   const CHUNK_BYTES = 180000;
+
+  // ─── Logging ──────────────────────────────────────────────────────────────
+
+  const LOG_PREFIX = '[KTT]';
+  function kttLog(emoji, ...args) {
+    console.log(`${LOG_PREFIX} ${emoji}`, ...args);
+  }
+  function kttWarn(emoji, ...args) {
+    console.warn(`${LOG_PREFIX} ${emoji}`, ...args);
+  }
+
+  // Expose full state dump for debugging — call kttDebug() in console
+  window.kttDebug = () => {
+    const state = {
+      pairSecure,
+      pairRole,
+      audioFromResponder,
+      responderReady,
+      pendingResponse,
+      respKupu,
+      respArmed,
+      respTapped,
+      respConfirmed,
+      audioCtxState: _audioCtx?.state || 'none',
+      reconnectState: loadReconnectState(),
+      pairElInDOM: !!pairEl?.parentNode,
+      fbInitialized: !!pairEl?._fb?.initialized,
+    };
+    console.group(`${LOG_PREFIX} 🔍 State dump`);
+    Object.entries(state).forEach(([k, v]) => console.log(`  ${k}:`, v));
+    console.groupEnd();
+    return state;
+  };
 
   // ─── State ────────────────────────────────────────────────────────────────
 
-  let pairEl       = null;   // <rapid-pair> element
-  let pairRole     = null;   // 'controller' | 'responder' | null
+  let pairEl       = null;
+  let pairRole     = null;
   let pairSecure   = false;
-  let audioFromResponder = false;  // if true, responder plays audio
-  let pendingResponse = null;      // kupu the responder tapped, awaiting confirm
+  let audioFromResponder = false;
+  let pendingResponse = null;
+  let responderReady  = false;
+  let respShowLabels  = true;   // mirrors clinician's showLabels setting
 
   // Responder-side state
   let respKupu      = [];
   let respArmed     = false;
   let respTapped    = null;
-  let respConfirmed = false;  // true after clinician confirms — blocks re-tap
+  let respConfirmed = false;
 
   // Audio (responder plays these)
   let respCarrier  = null;
   let respKupuAud  = null;
-  let _audioCtx    = null;   // unlocked AudioContext (iOS workaround)
+  let _audioCtx    = null;
 
-  // Call on first user gesture on the responder device to unlock iOS audio
   function unlockAudio() {
     if (_audioCtx) return;
     try {
       _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      // Play a silent buffer — this is the gesture-triggered unlock
       const buf = _audioCtx.createBuffer(1, 1, 22050);
       const src = _audioCtx.createBufferSource();
       src.buffer = buf;
       src.connect(_audioCtx.destination);
       src.start(0);
-      // Resume in case it started suspended
       if (_audioCtx.state === 'suspended') _audioCtx.resume();
-    } catch (_) {}
+      kttLog('🔊', 'AudioContext unlocked, state:', _audioCtx.state);
+    } catch (e) {
+      kttWarn('🔊', 'AudioContext unlock failed:', e.message);
+    }
   }
 
-  // iOS-safe play: use a fetch+decodeAudioData approach via the unlocked context
   function playAudioIOS(url) {
     return new Promise((resolve, reject) => {
+      kttLog('🎵', 'playAudioIOS:', url, '| ctx:', _audioCtx?.state || 'none');
       if (!_audioCtx) {
-        // Fall back to standard Audio element if no context yet
         const a = new Audio(url);
         a.play().catch(reject);
         a.onended = resolve;
@@ -65,7 +98,7 @@
           src.onended = resolve;
           src.start(0);
         })
-        .catch(reject);
+        .catch(err => { kttWarn('🎵', 'playAudioIOS error:', err.message); reject(err); });
     });
   }
 
@@ -74,14 +107,16 @@
   window.kttPaired = {
     init,
     openPairModal,
-    isConnected:    () => pairSecure,
-    getRole:        () => pairRole,
+    isConnected:          () => pairSecure,
+    getRole:              () => pairRole,
+    getAudioFromResponder:() => audioFromResponder,
     sendPlay,
     sendSync,
+    sendDisplay,
     sendListReset,
     sendConfirm,
     setAudioSource,
-    statusEl:       null,
+    statusEl:             null,
   };
 
   // ─── Fast reconnect ───────────────────────────────────────────────────────
@@ -106,67 +141,83 @@
     localStorage.removeItem(LS_KEY_RECONNECT);
   }
 
-  // Called when controller gets secure — generate secret, send to responder
   function initReconnectSecret() {
     const existing = loadReconnectState();
-    // Reuse existing secret if we have one; create new one if not
     const secret = existing?.secret || Array.from(crypto.getRandomValues(new Uint8Array(5)))
       .map(b => b.toString(36)).join('').toUpperCase();
+    const isNew = !existing?.secret;
     saveReconnectState({ secret, role: 'controller', savedAt: Date.now() });
-    // Tell responder the secret so they can save it too
+    kttLog('🔑', isNew ? 'Generated new reconnect secret:' : 'Reusing existing secret:', secret);
     pairEl.send('ktt-hello', { secret, v: 1 });
   }
 
-  // Responder receives the hello and saves the secret
   function onKttHello(p) {
     if (pairRole !== 'responder') return;
     saveReconnectState({ secret: p.secret, role: 'responder', savedAt: Date.now() });
+    kttLog('🔑', 'Responder: saved reconnect secret:', p.secret);
   }
 
-  // Get the Firebase db reference — reuse rapidpair's own instance
   async function getFB() {
-    // RapidPair lazily initialises Firebase when the element connects.
-    // We trigger that by appending the element (which we do in openPairModal
-    // anyway), then wait briefly for it to be ready.
-    // Fall back to our own lightweight init if needed.
-    if (pairEl._fb?.initialized) return pairEl._fb;
-    // Wait up to 2s for pairEl Firebase to init
+    if (pairEl._fb?.initialized) {
+      kttLog('🔥', 'Firebase already initialized');
+      return pairEl._fb;
+    }
+    kttLog('🔥', 'Waiting for Firebase to init…');
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 100));
-      if (pairEl._fb?.initialized) return pairEl._fb;
+      if (pairEl._fb?.initialized) {
+        kttLog('🔥', `Firebase ready after ${(i+1)*100}ms`);
+        return pairEl._fb;
+      }
     }
-    return null; // timed out — fall through to normal modal
+    kttWarn('🔥', 'Firebase init timed out after 2s');
+    return null;
   }
 
-  // Controller side: write a beacon, wait for responder to acknowledge
   async function attemptFastReconnect() {
     const state = loadReconnectState();
-    if (!state?.secret || state.role !== 'controller') return false;
+    kttLog('⚡', 'attemptFastReconnect — saved state:', state);
+    if (!state?.secret || state.role !== 'controller') {
+      kttLog('⚡', 'No saved controller secret — skipping fast reconnect');
+      return false;
+    }
+
+    const ageDays = (Date.now() - (state.savedAt || 0)) / 86400000;
+    kttLog('⚡', `Secret age: ${ageDays.toFixed(1)} days`);
 
     showFastReconnectUI('Checking for saved device…');
 
-    // Ensure pairEl is in DOM (needed for Firebase access)
-    if (!pairEl.parentNode) document.body.appendChild(pairEl);
+    if (!pairEl.parentNode) {
+      kttLog('⚡', 'Appending pairEl to DOM for Firebase access');
+      document.body.appendChild(pairEl);
+    }
 
     const fb = await getFB();
-    if (!fb) { hideFastReconnectUI(); return false; }
+    if (!fb) {
+      kttWarn('⚡', 'No Firebase — falling back to modal');
+      hideFastReconnectUI();
+      return false;
+    }
 
-    const secret  = state.secret;
+    const secret   = state.secret;
     const beaconId = secret + '_ctrl';
     const replyId  = secret + '_resp';
+    kttLog('⚡', `Writing controller beacon: ktt_beacons/${beaconId}`);
 
     try {
-      // Write controller beacon
       const beaconRef = fb.doc(fb.db, FB_BEACON_COLL, beaconId);
       await fb.setDoc(beaconRef, { ts: fb.ts(), status: 'calling' });
-
+      kttLog('⚡', 'Beacon written — waiting up to', BEACON_TIMEOUT_MS, 'ms for responder reply');
       showFastReconnectUI('Waiting for responder device…');
 
-      // Poll for responder's acknowledgement
       const found = await new Promise(resolve => {
-        const deadline = setTimeout(() => resolve(false), BEACON_TIMEOUT_MS);
+        const deadline = setTimeout(() => {
+          kttLog('⚡', `Beacon timeout after ${BEACON_TIMEOUT_MS}ms — no reply`);
+          resolve(false);
+        }, BEACON_TIMEOUT_MS);
         const unsub = fb.onSnapshot(fb.doc(fb.db, FB_BEACON_COLL, replyId), snap => {
           if (snap.exists() && snap.data()?.status === 'ready') {
+            kttLog('⚡', '✅ Responder beacon reply received!');
             clearTimeout(deadline);
             unsub();
             resolve(true);
@@ -174,70 +225,85 @@
         });
       });
 
-      // Clean up beacon docs
       fb.deleteDoc(beaconRef).catch(() => {});
       fb.deleteDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId)).catch(() => {});
 
       hideFastReconnectUI();
       if (found) {
+        kttLog('⚡', 'Fast reconnect succeeded — opening pairing modal');
         showFastReconnectUI('Responder found — opening pairing…');
-        // The responder device is online and ready.
-        // Open the pairing modal — the responder will auto-enter the code.
-        // Brief delay so the user sees the message.
         await new Promise(r => setTimeout(r, 600));
         hideFastReconnectUI();
-        return true; // caller should proceed with pairEl.open()
+        return true;
       }
+      kttLog('⚡', 'Fast reconnect: no reply — falling back to full modal');
       return false;
 
     } catch (err) {
-      console.warn('[KTT reconnect] beacon error:', err);
+      kttWarn('⚡', 'Beacon error:', err.message);
       hideFastReconnectUI();
       return false;
     }
   }
 
-  // Responder side: poll for controller beacon on app load, auto-enter code
   async function responderCheckBeacon() {
     const state = loadReconnectState();
-    if (!state?.secret || state.role !== 'responder') return;
+    kttLog('📡', 'responderCheckBeacon — saved state:', state);
+    if (!state?.secret || state.role !== 'responder') {
+      kttLog('📡', 'No saved responder secret — skipping beacon check');
+      return;
+    }
+    if (pairSecure) {
+      kttLog('📡', 'Already connected — skipping beacon check');
+      return;
+    }
 
-    // Don't run if already connected
-    if (pairSecure) return;
-
-    const secret  = state.secret;
+    const secret   = state.secret;
     const beaconId = secret + '_ctrl';
     const replyId  = secret + '_resp';
 
-    // Ensure pairEl is in DOM
-    if (!pairEl.parentNode) document.body.appendChild(pairEl);
+    if (!pairEl.parentNode) {
+      kttLog('📡', 'Appending pairEl to DOM for Firebase access');
+      document.body.appendChild(pairEl);
+    }
 
     const fb = await getFB();
-    if (!fb) return;
+    if (!fb) {
+      kttWarn('📡', 'No Firebase — cannot check beacon');
+      return;
+    }
 
     try {
-      // Check if controller beacon exists
+      kttLog('📡', `Checking for controller beacon: ktt_beacons/${beaconId}`);
       const snap = await fb.getDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId));
-      if (!snap.exists()) return;
+      if (!snap.exists()) {
+        kttLog('📡', 'No beacon found — controller not calling');
+        return;
+      }
 
       const ageSec = (Date.now() - (snap.data()?.ts?.toMillis?.() || 0)) / 1000;
-      if (ageSec > 30) return; // stale beacon
+      kttLog('📡', `Beacon found, age: ${ageSec.toFixed(1)}s`);
+      if (ageSec > 30) {
+        kttLog('📡', 'Beacon stale (>30s) — ignoring');
+        return;
+      }
 
-      // Write reply
+      kttLog('📡', `Writing responder reply: ktt_beacons/${replyId}`);
       await fb.setDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId), { ts: fb.ts(), status: 'ready' });
-
-      // Clean up controller beacon
       fb.deleteDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId)).catch(() => {});
 
-      // Open modal in responder mode — auto-click the responder role button
+      kttLog('📡', 'Reply sent — auto-opening pairing modal in responder mode');
       pairEl.open();
       await new Promise(r => setTimeout(r, 300));
       document.querySelectorAll('.rp-modal button').forEach(b => {
-        if (b.textContent.trim() === 'Responder device') b.click();
+        if (b.textContent.trim() === 'Responder device') {
+          kttLog('📡', 'Auto-clicking Responder device button');
+          b.click();
+        }
       });
 
     } catch (err) {
-      console.warn('[KTT reconnect] responder beacon check error:', err);
+      kttWarn('📡', 'Responder beacon check error:', err.message);
     }
   }
 
@@ -269,24 +335,22 @@
   // ─── Init ─────────────────────────────────────────────────────────────────
 
   function init() {
-    // Create the element and wire all listeners NOW so messages aren't missed,
-    // but do NOT append it to the DOM yet — that would trigger connectedCallback
-    // and auto-open the pairing modal immediately.
+    kttLog('🚀', 'pairedMode init');
+    const savedState = loadReconnectState();
+    if (savedState) kttLog('💾', 'Saved reconnect state:', savedState);
+    else kttLog('💾', 'No saved reconnect state');
+
     pairEl = document.createElement('rapid-pair');
     pairEl.id = 'ktt-rapid-pair';
     pairEl.setAttribute('controller-label', 'Clinician');
     pairEl.setAttribute('responder-label',  'Responder device');
     pairEl.setAttribute('auto-close', 'true');
 
-    // Wire events before appending
-    pairEl.addEventListener('secure', onSecure);
+    pairEl.addEventListener('secure',       onSecure);
     pairEl.addEventListener('disconnected', onDisconnected);
-    pairEl.addEventListener('reconnected', onReconnected);
+    pairEl.addEventListener('reconnected',  onReconnected);
 
-    // Controller receives
-    pairEl.on('ktt-response', onKttResponse);
-
-    // Responder receives
+    pairEl.on('ktt-response',    onKttResponse);
     pairEl.on('ktt-sync',        onKttSync);
     pairEl.on('ktt-image-chunk', onKttImageChunk);
     pairEl.on('ktt-play',        onKttPlay);
@@ -294,9 +358,13 @@
     pairEl.on('ktt-list-reset',  onKttListReset);
     pairEl.on('ktt-list-update', onKttSync);
     pairEl.on('ktt-hello',       onKttHello);
+    pairEl.on('ktt-ready',       onKttReadyReceived);
+    pairEl.on('ktt-display',     onKttDisplay);
 
-    // ?role=responder support (future)
+    kttLog('🚀', 'All listeners registered. pairEl NOT in DOM yet.');
+
     if (new URLSearchParams(location.search).get('role') === 'responder') {
+      kttLog('🔗', '?role=responder detected — auto-opening modal');
       openPairModal();
       setTimeout(() => {
         document.querySelectorAll('.rp-modal button').forEach(b => {
@@ -305,26 +373,25 @@
       }, 500);
     }
 
-    // If this device has a saved responder pairing, silently check for a
-    // waiting controller beacon in the background (runs ~2s after load)
-    const state = loadReconnectState();
-    if (state?.secret && state.role === 'responder') {
+    if (savedState?.secret && savedState.role === 'responder') {
+      kttLog('📡', 'Scheduling responder beacon check in 2s');
       setTimeout(responderCheckBeacon, 2000);
     }
   }
 
   function openPairModal() {
-    // If we have a saved pairing, try fast reconnect first
     const state = loadReconnectState();
+    kttLog('📱', 'openPairModal — saved state:', state, '| pairSecure:', pairSecure);
+
     if (state?.secret && state.role === 'controller' && !pairSecure) {
+      kttLog('⚡', 'Attempting fast reconnect before opening modal');
       attemptFastReconnect().then(found => {
-        // Whether found or not, open the modal — if found the responder will
-        // auto-enter their side, if not the clinician does it manually as normal
+        kttLog('⚡', 'Fast reconnect result:', found ? 'succeeded' : 'failed/timed out', '— opening modal');
         if (!pairEl.parentNode) document.body.appendChild(pairEl);
         else pairEl.open();
       });
     } else {
-      // First time or responder role — just open normally
+      kttLog('📱', 'Opening modal directly (no saved state or already connected)');
       if (!pairEl.parentNode) document.body.appendChild(pairEl);
       else pairEl.open();
     }
@@ -339,28 +406,30 @@
   function onSecure(e) {
     pairRole   = e.detail.role;
     pairSecure = true;
+    kttLog('🔒', 'SECURE — role:', pairRole, '| verifyCode:', e.detail.verifyCode);
     updateStatusBadge('connected');
 
     if (pairRole === 'controller') {
-      // Generate/reuse shared reconnect secret and send to responder
       initReconnectSecret();
-      // Tell responder to show waiting state — grid populates on "Start test"
       const list = window.kttManual?.getActiveListForPair?.();
+      kttLog('📋', 'Controller: sending list-reset, list:', list?.name || 'none');
       sendListReset(list?.name || '');
     } else {
-      // Responder: hide clinician UI, show waiting screen
+      kttLog('📺', 'Responder: activating responder mode');
       activateResponderMode();
     }
   }
 
   function onDisconnected() {
     pairSecure = false;
+    kttLog('❌', 'DISCONNECTED');
     updateStatusBadge('disconnected');
   }
 
   function onReconnected(e) {
     pairRole   = e.detail.role;
     pairSecure = true;
+    kttLog('🔄', 'RECONNECTED — role:', pairRole);
     updateStatusBadge('connected');
     if (pairRole === 'controller') {
       const list = window.kttManual?.getActiveListForPair?.();
@@ -385,37 +454,53 @@
 
   // ─── CONTROLLER — send helpers ────────────────────────────────────────────
 
+  function onKttReadyReceived() {
+    if (pairRole !== 'controller') return;
+    responderReady = true;
+    kttLog('✅', 'Responder is ready (tapped commence)');
+    if (typeof window.kttManual?.onPairReady === 'function') window.kttManual.onPairReady();
+  }
+
   function sendListReset(listName) {
     if (!pairSecure || pairRole !== 'controller') return;
+    responderReady = false;
+    kttLog('📋', 'sendListReset:', listName || '(no name)');
+    if (typeof window.kttManual?.onPairResponderWaiting === 'function') window.kttManual.onPairResponderWaiting();
     pairEl.send('ktt-list-reset', { listName: listName || '' });
+  }
+
+  function sendDisplay(showLabels) {
+    if (!pairSecure || pairRole !== 'controller') return;
+    respShowLabels = showLabels;
+    kttLog('🏷', 'sendDisplay: showLabels =', showLabels);
+    pairEl.send('ktt-display', { showLabels });
   }
 
   function sendSync() {
     if (!pairSecure || pairRole !== 'controller') return;
+    responderReady = false;
+    if (typeof window.kttManual?.onPairResponderWaiting === 'function') window.kttManual.onPairResponderWaiting();
     const list = window.kttManual?.getActiveListForPair?.() || null;
-    if (!list) return;
-
-    // Send list structure first (fast, small)
-    pairEl.send('ktt-sync', { kupu: list.kupu, listName: list.name });
-
-    // Then stream image overrides as individual chunks
+    if (!list) { kttWarn('📤', 'sendSync: no active list'); return; }
+    // Include current showLabels setting from clinician
+    const showLabels = typeof window.kttManual?.getShowLabels === 'function'
+      ? window.kttManual.getShowLabels() : true;
+    kttLog('📤', 'sendSync: list =', list.name, '| kupu count:', list.kupu.length, '| showLabels:', showLabels);
+    pairEl.send('ktt-sync', { kupu: list.kupu, listName: list.name, showLabels });
     const overrides = window.kttImageStore ? window.kttImageStore.all() : {};
     const keys = Object.keys(overrides).filter(k => list.kupu.includes(k));
+    kttLog('🖼', 'Image overrides to send:', keys.length, keys.length ? keys : '(none)');
     let delay = 100;
     keys.forEach(kupu => {
       const dataURL = overrides[kupu];
       if (!dataURL) return;
-      // Split large data URLs into chunks
       const chunks = [];
-      for (let i = 0; i < dataURL.length; i += CHUNK_BYTES) {
-        chunks.push(dataURL.slice(i, i + CHUNK_BYTES));
-      }
+      for (let i = 0; i < dataURL.length; i += CHUNK_BYTES) chunks.push(dataURL.slice(i, i + CHUNK_BYTES));
+      kttLog('🖼', `  ${kupu}: ${chunks.length} chunk(s), ~${Math.round(dataURL.length/1024)}KB`);
       chunks.forEach((chunk, idx) => {
         setTimeout(() => {
           if (!pairSecure) return;
-          pairEl.send('ktt-image-chunk', {
-            kupu, idx, total: chunks.length, data: chunk
-          });
+          pairEl.send('ktt-image-chunk', { kupu, idx, total: chunks.length, data: chunk });
         }, delay);
         delay += 60;
       });
@@ -424,20 +509,16 @@
 
   function sendPlay(kupu, level) {
     if (!pairSecure || pairRole !== 'controller') return;
-    pairEl.send('ktt-play', {
-      kupu,
-      level,
-      playAudio: audioFromResponder,  // if true, responder should play audio
-    });
-    // Mark responder grid as pending this kupu
+    kttLog('▶', `sendPlay: ${kupu} @ ${level} dBA | playAudio on responder: ${audioFromResponder}`);
+    pairEl.send('ktt-play', { kupu, level, playAudio: audioFromResponder });
     pendingResponse = null;
   }
 
   function sendConfirm(correct) {
     if (!pairSecure || pairRole !== 'controller') return;
+    kttLog('📝', `sendConfirm: ${correct ? 'CORRECT' : 'INCORRECT'} | kupu: ${pendingResponse}`);
     pairEl.send('ktt-confirm', { correct, kupu: pendingResponse });
     pendingResponse = null;
-    // Clear highlight in controller table
     refreshControllerHighlight(null);
   }
 
@@ -445,18 +526,14 @@
 
   function onKttResponse(p) {
     if (pairRole !== 'controller') return;
+    kttLog('👆', `Responder tapped: ${p.kupu} (prev: ${pendingResponse || 'none'})`);
     pendingResponse = p.kupu;
     refreshControllerHighlight(p.kupu);
-    // Update confirm bar — works for both first response and changes
-    if (typeof window.kttManual?.onPairResponse === 'function') {
-      window.kttManual.onPairResponse(p.kupu);
-    }
+    if (typeof window.kttManual?.onPairResponse === 'function') window.kttManual.onPairResponse(p.kupu);
   }
 
   function refreshControllerHighlight(kupu) {
-    document.querySelectorAll('#mt-tbody tr').forEach(tr => {
-      tr.classList.remove('mt-row-peer-response');
-    });
+    document.querySelectorAll('#mt-tbody tr').forEach(tr => tr.classList.remove('mt-row-peer-response'));
     if (!kupu) return;
     const row = document.querySelector(`#mt-tbody tr[data-kupu="${CSS.escape(kupu)}"]`);
     if (row) row.classList.add('mt-row-peer-response');
@@ -464,21 +541,31 @@
 
   // ─── RESPONDER — receive and render ───────────────────────────────────────
 
-  // Assembled image chunks: { kupu → { parts[], total, received } }
   const _imgChunks = {};
 
   function onKttListReset(p) {
     if (pairRole !== 'responder') return;
-    respKupu   = [];
-    respArmed  = false;
-    respTapped = null;
+    kttLog('📋', 'Received list-reset — returning to waiting screen');
+    respKupu = []; respArmed = false; respTapped = null;
     stopRespAudio();
     activateResponderMode();
   }
 
+  function onKttDisplay(p) {
+    if (pairRole !== 'responder') return;
+    respShowLabels = p.showLabels;
+    kttLog('🏷', 'Received ktt-display: showLabels =', respShowLabels);
+    // Update labels on existing grid without full re-render
+    document.querySelectorAll('#ktt-responder-grid .resp-lbl').forEach(lbl => {
+      lbl.style.display = respShowLabels ? '' : 'none';
+    });
+  }
+
   function onKttSync(p) {
     if (pairRole !== 'responder') return;
-    respKupu  = p.kupu || [];
+    respKupu = p.kupu || [];
+    if (p.showLabels !== undefined) respShowLabels = p.showLabels;
+    kttLog('📥', 'Received ktt-sync | kupu count:', respKupu.length, '| showLabels:', respShowLabels);
     renderResponderGrid();
   }
 
@@ -489,63 +576,62 @@
     const c = _imgChunks[kupu];
     if (!c.parts[idx]) { c.parts[idx] = data; c.received++; }
     if (c.received === c.total) {
+      kttLog('🖼', `Image chunk complete for ${kupu} (${total} chunk(s))`);
       const dataURL = c.parts.join('');
       delete _imgChunks[kupu];
-      // Update image in responder grid
       const img = document.querySelector(`#ktt-responder-grid [data-kupu="${CSS.escape(kupu)}"] img`);
-      if (img) img.src = dataURL;
+      if (img) { img.src = dataURL; kttLog('🖼', `Updated img for ${kupu}`); }
+      else kttWarn('🖼', `No img element found for ${kupu} in grid`);
+    } else {
+      kttLog('🖼', `Chunk ${idx+1}/${total} received for ${kupu}`);
     }
   }
 
   function onKttPlay(p) {
     if (pairRole !== 'responder') return;
-    respArmed     = false;
-    respTapped    = null;
-    respConfirmed = false;
-    // Clear any previous highlight
+    kttLog('▶', `Received ktt-play: ${p.kupu} @ ${p.level} dBA | playAudio: ${p.playAudio}`);
+    respArmed = false; respTapped = null; respConfirmed = false;
     document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => {
       c.classList.remove('resp-tapped', 'resp-correct', 'resp-incorrect');
     });
-
     if (p.playAudio) {
       stopRespAudio();
       const carrierURL = CARRIER_URL;
       const kupuURL    = `${AUDIO_DIR}/${encodeURIComponent(p.kupu)}.mp3`;
-
-      // Show a "tap to play" prompt if audio context not yet unlocked (iOS first play)
+      kttLog('🎵', 'Playing audio on responder | audioCtx:', _audioCtx?.state || 'none');
       if (!_audioCtx) {
+        kttWarn('🎵', 'AudioContext not yet unlocked — showing tap prompt');
         showRespAudioPrompt(() => {
-          playAudioIOS(carrierURL)
-            .then(() => playAudioIOS(kupuURL))
-            .then(() => { respArmed = true; })
-            .catch(() => { respArmed = true; });
+          playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
+            .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; })
+            .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; });
         });
       } else {
-        playAudioIOS(carrierURL)
-          .then(() => playAudioIOS(kupuURL))
-          .then(() => { respArmed = true; })
-          .catch(() => { respArmed = true; });
+        playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
+          .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; })
+          .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; });
       }
     } else {
+      kttLog('🎵', 'Audio playing on controller — arming grid after 800ms');
       setTimeout(() => { respArmed = true; }, 800);
     }
   }
 
   function onKttConfirm(p) {
     if (pairRole !== 'responder') return;
+    kttLog('📝', `Received confirm: ${p.correct ? 'CORRECT' : 'INCORRECT'} | kupu: ${p.kupu}`);
     respConfirmed = true;
-    const cell = document.querySelector(
-      `#ktt-responder-grid [data-kupu="${CSS.escape(p.kupu || respTapped)}"]`
-    );
+    const cell = document.querySelector(`#ktt-responder-grid [data-kupu="${CSS.escape(p.kupu || respTapped)}"]`);
     if (cell) {
       cell.classList.remove('resp-tapped');
       cell.classList.add(p.correct ? 'resp-correct' : 'resp-incorrect');
       setTimeout(() => {
         cell.classList.remove('resp-correct', 'resp-incorrect');
-        respConfirmed = false;
-        respTapped    = null;
-        respArmed     = true;
+        respConfirmed = false; respTapped = null; respArmed = true;
+        kttLog('📝', 'Confirm flash done — grid re-armed');
       }, 1200);
+    } else {
+      kttWarn('📝', 'No cell found for confirm kupu:', p.kupu || respTapped);
     }
   }
 
@@ -643,6 +729,7 @@
       const lbl = document.createElement('div');
       lbl.className = 'resp-lbl';
       lbl.textContent = kupu;
+      if (!respShowLabels) lbl.style.display = 'none';
 
       cell.append(img, lbl);
       cell.addEventListener('click',    ()  => onResponderTap(kupu));
@@ -651,48 +738,56 @@
     });
 
     view.appendChild(grid);
-    // Mark grid interactive immediately — first play will arm it properly
     respArmed = false;
 
-    // Show a one-time audio unlock prompt at the bottom for iOS
-    if (!_audioCtx) {
-      const hint = document.createElement('div');
-      hint.id = 'ktt-audio-hint';
-      hint.style.cssText = `
-        position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
-        background:rgba(0,0,0,.7);color:#fff;font-family:system-ui,sans-serif;
-        font-size:13px;padding:8px 18px;border-radius:999px;z-index:6000;
-        pointer-events:none;
-      `;
-      hint.textContent = '🔊 Tap any image to enable audio';
-      view.appendChild(hint);
-      // Remove after first tap (unlockAudio called in onResponderTap)
-      const removeHint = () => { hint.remove(); view.removeEventListener('click', removeHint); };
-      view.addEventListener('click', removeHint);
-    }
+    // Always show "Tap here to commence" — unlocks iOS audio on first render,
+    // and signals readiness to controller on every new test/list
+    showCommenceOverlay();
+  }
+
+  function showCommenceOverlay() {
+    const existing = document.getElementById('ktt-commence-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'ktt-commence-overlay';
+    overlay.style.cssText = `
+      position:fixed;inset:0;background:rgba(15,40,80,.82);z-index:6500;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      font-family:system-ui,sans-serif;color:#fff;text-align:center;padding:32px;
+      cursor:pointer;-webkit-tap-highlight-color:transparent;
+    `;
+    overlay.innerHTML = `
+      <div style="font-size:56px;margin-bottom:20px">👂</div>
+      <div style="font-size:24px;font-weight:700;margin-bottom:10px">Tap here to commence</div>
+      <div style="font-size:15px;color:rgba(255,255,255,.75);max-width:280px;line-height:1.5">
+        This will also enable audio on your device
+      </div>
+    `;
+    overlay.onclick = () => {
+      unlockAudio();
+      overlay.remove();
+      // Tell controller the responder is ready
+      if (pairSecure) pairEl.send('ktt-ready', { ts: Date.now() });
+    };
+    document.body.appendChild(overlay);
   }
 
   function onResponderTap(kupu) {
-    // Unlock iOS audio on every tap (safe to call multiple times)
     unlockAudio();
-
-    // Grid must be armed (i.e. a play has happened)
-    if (!respArmed) return;
-    // If clinician has already confirmed, don't allow changes
-    if (respConfirmed) return;
-
-    // Allow changing — clear previous highlight
-    document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => {
-      c.classList.remove('resp-tapped');
-    });
-
+    kttLog('👆', `Tap: ${kupu} | armed: ${respArmed} | confirmed: ${respConfirmed} | tapped: ${respTapped}`);
+    if (!respArmed) { kttLog('👆', 'Ignoring — grid not armed'); return; }
+    if (respConfirmed) { kttLog('👆', 'Ignoring — waiting for confirm flash to finish'); return; }
+    document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => c.classList.remove('resp-tapped'));
     respTapped = kupu;
-
     const cell = document.querySelector(`#ktt-responder-grid [data-kupu="${CSS.escape(kupu)}"]`);
     if (cell) cell.classList.add('resp-tapped');
-
-    // Send/update response to controller — controller confirm bar updates each time
-    if (pairSecure) pairEl.send('ktt-response', { kupu, ts: Date.now() });
+    if (pairSecure) {
+      kttLog('👆', 'Sending ktt-response:', kupu);
+      pairEl.send('ktt-response', { kupu, ts: Date.now() });
+    } else {
+      kttWarn('👆', 'Not connected — response not sent');
+    }
   }
 
   // ─── CSS injection ────────────────────────────────────────────────────────
