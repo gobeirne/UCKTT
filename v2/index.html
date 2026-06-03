@@ -141,7 +141,7 @@
   /* ── Manual test screens ────────────────────────── */
   #manualSetupView, #manualTestView {
     display: none; flex-direction: column;
-    min-height: 100dvh; height: 100dvh; overflow-y: auto;
+    height: 100dvh; overflow: hidden;
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 13px; color: #111; background: #fafafa;
   }
@@ -189,9 +189,9 @@
   .mt-hint-text { font-size: 11px; color: #888; }
 
   /* Setup layout */
-  .mt-setup-body  { display: grid; grid-template-columns: 1fr 260px; flex: 1; overflow: auto; min-height: 0; }
-  .mt-setup-left  { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; border-right: 1px solid #e0e0e0; overflow-y: auto; }
-  .mt-setup-right { padding: 14px; display: flex; flex-direction: column; gap: 12px; background: #f7f7f7; overflow-y: auto; }
+  .mt-setup-body  { display: grid; grid-template-columns: 1fr 260px; flex: 1; min-height: 0; overflow: hidden; }
+  .mt-setup-left  { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; border-right: 1px solid #e0e0e0; overflow-y: auto; min-height: 0; }
+  .mt-setup-right { padding: 14px; display: flex; flex-direction: column; gap: 12px; background: #f7f7f7; overflow-y: auto; min-height: 0; }
 
   /* Form */
   .mt-form-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -305,13 +305,19 @@
   .mt-leg-pip.empty     { background: #f0f0f0; }
 
   @media (max-width: 700px) {
+    /* On mobile the whole page scrolls — remove fixed height containers */
+    #manualSetupView, #manualTestView {
+      height: auto; overflow: visible;
+    }
+
     /* Setup screen — stack left then right */
     .mt-setup-body {
       grid-template-columns: 1fr;
       grid-template-rows: auto auto;
+      overflow: visible;
     }
-    .mt-setup-left  { border-right: none; border-bottom: 1px solid #e0e0e0; overflow-y: visible; }
-    .mt-setup-right { border-top: none; }
+    .mt-setup-left  { border-right: none; border-bottom: 1px solid #e0e0e0; overflow-y: visible; height: auto; }
+    .mt-setup-right { border-top: none; overflow-y: visible; height: auto; }
 
     /* UC header — tighten up */
     .mt-uc-header { padding: 8px 12px; gap: 8px; }
@@ -389,11 +395,6 @@
     font-size: 12px; padding: 4px 10px; border: none; border-radius: 6px;
     background: #1a5fa5; color: #fff; cursor: pointer;
   }
-
-  /* Setup layout */
-  .mt-setup-body { display: grid; grid-template-columns: 1fr 260px; flex: 1; overflow: auto; }
-  .mt-setup-left  { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; border-right: 1px solid #e0e0e0; overflow-y: auto; }
-  .mt-setup-right { padding: 14px; display: flex; flex-direction: column; gap: 12px; background: #f7f7f7; overflow-y: auto; }
 
 </style>
 
