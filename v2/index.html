@@ -140,7 +140,8 @@
 
   /* ── Manual test screens ────────────────────────── */
   #manualSetupView, #manualTestView {
-    display: none; flex-direction: column; min-height: 100dvh;
+    display: none; flex-direction: column;
+    min-height: 100dvh; height: 100dvh; overflow-y: auto;
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 13px; color: #111; background: #fafafa;
   }
@@ -188,7 +189,7 @@
   .mt-hint-text { font-size: 11px; color: #888; }
 
   /* Setup layout */
-  .mt-setup-body  { display: grid; grid-template-columns: 1fr 260px; flex: 1; overflow: auto; }
+  .mt-setup-body  { display: grid; grid-template-columns: 1fr 260px; flex: 1; overflow: auto; min-height: 0; }
   .mt-setup-left  { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; border-right: 1px solid #e0e0e0; overflow-y: auto; }
   .mt-setup-right { padding: 14px; display: flex; flex-direction: column; gap: 12px; background: #f7f7f7; overflow-y: auto; }
 
@@ -200,14 +201,14 @@
 
   /* List selector */
   .mt-list-card { padding: 5px 6px; }
-  .mt-list-item { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .mt-list-item { display: flex; align-items: center; gap: 7px; padding: 8px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; min-width: 0; }
   .mt-list-item:hover { background: #f5f5f5; }
   .mt-list-item.active { background: #e8f0fc; border-color: #3a7de0; }
   .mt-list-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .mt-list-dot.custom  { background: #3a7de0; }
   .mt-list-dot.builtin { background: #999; }
-  .mt-list-name { flex: 1; font-size: 13px; }
-  .mt-list-meta { font-size: 11px; color: #888; }
+  .mt-list-name { flex: 1; font-size: 13px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mt-list-meta { font-size: 11px; color: #888; flex-shrink: 0; white-space: nowrap; }
   .mt-badge { font-size: 10px; padding: 1px 5px; border-radius: 10px; margin-left: 5px; vertical-align: middle; }
   .mt-badge.custom  { background: #e8f0fc; color: #1a5fa5; border: 1px solid #9ab8f0; }
   .mt-badge.builtin { background: #f0f0f0; color: #666; border: 1px solid #d0d0d0; }
@@ -303,11 +304,67 @@
   .mt-leg-pip.incorrect { background: #d94040; border-color: #a02020; }
   .mt-leg-pip.empty     { background: #f0f0f0; }
 
-  @media (max-width: 640px) {
-    .mt-setup-body  { grid-template-columns: 1fr; }
-    .mt-test-body   { grid-template-columns: 1fr; }
-    .mt-test-sidebar { border-top: 1px solid #e0e0e0; }
-    .mt-setup-right { border-top: 1px solid #e0e0e0; }
+  @media (max-width: 700px) {
+    /* Setup screen — stack left then right */
+    .mt-setup-body {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto;
+    }
+    .mt-setup-left  { border-right: none; border-bottom: 1px solid #e0e0e0; overflow-y: visible; }
+    .mt-setup-right { border-top: none; }
+
+    /* UC header — tighten up */
+    .mt-uc-header { padding: 8px 12px; gap: 8px; }
+    .mt-uc-logo   { height: 28px; }
+    .mt-uc-title  { font-size: 13px; }
+    .mt-uc-header-right { flex-wrap: wrap; gap: 4px; }
+
+    /* Form rows — single column on small screens */
+    .mt-form-row { flex-direction: column; gap: 6px; }
+    .mt-form-row > div { min-width: 0 !important; flex: none !important; width: 100%; }
+
+    /* List items — prevent wrapping */
+    .mt-list-item { padding: 8px 6px; gap: 5px; }
+    .mt-list-name { font-size: 12px; min-width: 0; }
+    .mt-list-meta { white-space: nowrap; font-size: 10px; }
+    .mt-badge     { display: none; }  /* hide badge on mobile to save space */
+
+    /* Scoring cards — stack vertically */
+    .mt-scoring-cards { flex-direction: column; }
+    .mt-scoring-card  { min-width: 0; }
+
+    /* Actions — already full width, just tighten padding */
+    .mt-card { padding: 8px 10px; }
+
+    /* Test screen — full single column, sidebar below */
+    .mt-test-body {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto;
+      overflow: visible;
+    }
+    .mt-test-main    { overflow: visible; border-right: none; border-bottom: 1px solid #e0e0e0; }
+    .mt-test-sidebar { border-top: none; overflow: visible; }
+    .mt-table-wrap   { overflow-x: auto; }
+
+    /* Level bar — wrap gracefully */
+    .mt-level-bar { gap: 5px; padding: 6px 8px; }
+    .mt-level-disp { font-size: 14px; min-width: 52px; }
+    .mt-level-btn  { padding: 4px 8px; font-size: 14px; }
+    .mt-play-btn   { padding: 7px 12px !important; }
+
+    /* Info bar */
+    .mt-info-bar { padding: 5px 10px; gap: 6px; }
+    .mt-label-toggle { margin-left: 0; }
+
+    /* Topbar */
+    .mt-topbar { padding: 7px 10px; gap: 5px; }
+    .mt-uc-titles { display: none; }  /* hide subtitle on very small screens */
+  }
+
+  @media (max-width: 400px) {
+    .mt-uc-title  { font-size: 12px; }
+    .mt-level-bar { flex-wrap: wrap; }
+    .mt-armed-label { width: 100%; order: 10; }
   }
 
   .mt-topbar {
