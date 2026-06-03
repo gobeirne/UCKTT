@@ -295,6 +295,19 @@
         item.appendChild(el('button', { cls: 'mt-btn', style: 'padding:2px 8px;font-size:11px',
           onclick: e => { e.stopPropagation(); openListBuilder(list.id); }
         }, 'Edit'));
+        item.appendChild(el('button', {
+          cls: 'mt-btn', style: 'padding:2px 6px;font-size:11px;color:#c0392b;border-color:#e0b0b0',
+          title: 'Delete this list',
+          onclick: e => {
+            e.stopPropagation();
+            if (!confirm(`Delete "${list.name}"? This cannot be undone.`)) return;
+            const remaining = loadCustomLists().filter(l => l.id !== list.id);
+            saveCustomLists(remaining);
+            if (activeListId === list.id) activeListId = null;
+            rebuildAllLists();
+            renderSetupScreen();
+          }
+        }, '✕'));
       }
       return item;
     }
@@ -343,6 +356,8 @@
       style: 'width:100%;margin-bottom:6px', onclick: startManualTest }, '▶ Start manual test'));
     card.appendChild(el('button', { cls: 'mt-btn',
       style: 'width:100%;margin-bottom:4px', onclick: printImageSheet }, '🖨 Print image sheet'));
+    card.appendChild(el('button', { cls: 'mt-btn',
+      style: 'width:100%;margin-bottom:4px', onclick: openImageManager }, '🖼 Manage images'));
     card.appendChild(el('button', { cls: 'mt-btn', style: 'width:100%;color:#888',
       onclick: () => alert('Paired device mode coming soon!') }, '📱 Pair child\'s device'));
     return card;
@@ -458,27 +473,24 @@
     list = list || getActiveList();
     if (!list) return;
 
-    // Empty state
-    if (levelsUsed.length === 0) {
-      const empty = el('div', { cls: 'mt-table-empty' },
-        'Select a kupu above and press Play to begin scoring.');
-      container.appendChild(empty);
-      return;
-    }
-
     const table = el('table', { cls: 'mt-ktable', id: 'mt-ktable' });
 
-    // Header
+    // Header — kupu column always, then one column per level used
     const thead = el('thead');
     const hrow  = el('tr');
     hrow.appendChild(el('th', { cls: 'mt-th-kupu' }, showLabels ? 'Kupu' : ''));
-    levelsUsed.forEach(lv => {
-      hrow.appendChild(el('th', { cls: 'mt-th-level' + (lv === currentLevel ? ' current-level' : '') }, `${lv} dBA`));
-    });
+    if (levelsUsed.length === 0) {
+      hrow.appendChild(el('th', { cls: 'mt-th-level', style: 'color:#bbb;font-style:italic;font-weight:normal' },
+        'press Play to score'));
+    } else {
+      levelsUsed.forEach(lv => {
+        hrow.appendChild(el('th', { cls: 'mt-th-level' + (lv === currentLevel ? ' current-level' : '') }, `${lv} dBA`));
+      });
+    }
     thead.appendChild(hrow);
     table.appendChild(thead);
 
-    // Body
+    // Body — always render all kupu rows
     const tbody = el('tbody', { id: 'mt-tbody' });
     list.kupu.forEach(kupu => tbody.appendChild(buildKupuRow(kupu)));
     table.appendChild(tbody);
@@ -644,50 +656,261 @@
     refreshScoringTable();
   }
 
+  // ─── Image manager ────────────────────────────────────────────────────────
+
+  function openImageManager() {
+    const list = getActiveList();
+    if (!list) { alert('No list selected'); return; }
+
+    const existing = document.getElementById('mt-img-manager');
+    if (existing) { existing.remove(); return; }
+
+    // Build the full word pool — all unique kupu across all lists so you can
+    // manage images even for kupu not in the current list
+    const allKupu = [...new Set(allLists.flatMap(l => l.kupu))].sort();
+    const overrides = window.kttImageStore ? window.kttImageStore.all() : {};
+
+    // Inject styles once
+    if (!document.getElementById('mt-imgmgr-styles')) {
+      const s = document.createElement('style');
+      s.id = 'mt-imgmgr-styles';
+      s.textContent = `
+        .imgmgr-overlay { position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9500;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box; }
+        .imgmgr-modal { background:#fff;border-radius:10px;width:100%;max-width:780px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.2); }
+        .imgmgr-header { display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #e8e8e8;background:#f7f7f7;flex-shrink:0; }
+        .imgmgr-title { font-size:14px;font-weight:700; }
+        .imgmgr-sub { font-size:11px;color:#888;margin-top:1px; }
+        .imgmgr-close { font-size:18px;border:none;background:none;cursor:pointer;color:#888;padding:2px 8px;border-radius:4px; }
+        .imgmgr-close:hover { background:#eee;color:#333; }
+        .imgmgr-filter { padding:8px 16px;border-bottom:1px solid #f0f0f0;display:flex;gap:8px;align-items:center;flex-shrink:0; }
+        .imgmgr-filter input { flex:1;font-size:13px;padding:5px 9px;border:1px solid #ccc;border-radius:6px; }
+        .imgmgr-filter label { font-size:12px;color:#666;display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap; }
+        .imgmgr-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;padding:14px 16px;overflow-y:auto;flex:1; }
+        .imgmgr-cell { display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px;border:1px solid #e8e8e8;border-radius:8px;background:#fafafa; }
+        .imgmgr-cell.has-override { border-color:#3a7de0;background:#f0f5ff; }
+        .imgmgr-cell img { width:80px;height:80px;object-fit:contain;border-radius:4px; }
+        .imgmgr-name { font-size:11px;font-weight:700;color:#333;text-align:center; }
+        .imgmgr-badge { font-size:9px;color:#1a5fa5;background:#e8f0fc;border-radius:10px;padding:1px 6px; }
+        .imgmgr-btn { font-size:11px;padding:3px 9px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;width:100%; }
+        .imgmgr-btn:hover { background:#f0f0f0; }
+        .imgmgr-btn.restore { border-color:#e0b0b0;color:#c0392b; }
+        .imgmgr-btn.restore:hover { background:#fde8e8; }
+      `;
+      document.head.appendChild(s);
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'mt-img-manager';
+    overlay.className = 'imgmgr-overlay';
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+    const modal = document.createElement('div');
+    modal.className = 'imgmgr-modal';
+    overlay.appendChild(modal);
+
+    // Header
+    const hdr = document.createElement('div');
+    hdr.className = 'imgmgr-header';
+    hdr.innerHTML = `
+      <div>
+        <div class="imgmgr-title">Manage images</div>
+        <div class="imgmgr-sub">Click "Replace" to upload a custom image for any kupu. Stored on this device.</div>
+      </div>
+      <button class="imgmgr-close" id="imgmgr-close">✕</button>`;
+    modal.appendChild(hdr);
+    hdr.querySelector('#imgmgr-close').onclick = () => overlay.remove();
+
+    // Filter bar
+    const filterBar = document.createElement('div');
+    filterBar.className = 'imgmgr-filter';
+    filterBar.innerHTML = `
+      <input id="imgmgr-search" type="search" placeholder="Search kupu…">
+      <label><input type="checkbox" id="imgmgr-overrides-only"> Custom only</label>`;
+    modal.appendChild(filterBar);
+
+    // Grid
+    const grid = document.createElement('div');
+    grid.className = 'imgmgr-grid';
+    modal.appendChild(grid);
+
+    function buildGrid(filter, overridesOnly) {
+      grid.innerHTML = '';
+      const overrides = window.kttImageStore ? window.kttImageStore.all() : {};
+      const kupuToShow = allKupu.filter(k => {
+        if (overridesOnly && !overrides[k]) return false;
+        if (filter && !k.toLowerCase().includes(filter.toLowerCase())) return false;
+        return true;
+      });
+
+      if (!kupuToShow.length) {
+        grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#aaa;padding:24px;font-size:13px">No kupu match</div>';
+        return;
+      }
+
+      kupuToShow.forEach(kupu => {
+        const hasOverride = !!overrides[kupu];
+        const cell = document.createElement('div');
+        cell.className = 'imgmgr-cell' + (hasOverride ? ' has-override' : '');
+
+        const img = document.createElement('img');
+        img.alt = kupu;
+        if (window.loadKupuImage) window.loadKupuImage(img, kupu);
+        else img.src = `Images/${encodeURIComponent(kupu)}.png`;
+
+        const name = document.createElement('div');
+        name.className = 'imgmgr-name';
+        name.textContent = kupu;
+
+        const replBtn = document.createElement('button');
+        replBtn.className = 'imgmgr-btn';
+        replBtn.textContent = 'Replace…';
+        replBtn.onclick = () => {
+          if (window.kttImageStore) {
+            window.kttImageStore.openReplacer(kupu, () => buildGrid(
+              document.getElementById('imgmgr-search').value,
+              document.getElementById('imgmgr-overrides-only').checked
+            ));
+          }
+        };
+
+        cell.append(img, name);
+        if (hasOverride) {
+          const badge = document.createElement('div');
+          badge.className = 'imgmgr-badge';
+          badge.textContent = 'custom';
+          cell.appendChild(badge);
+          const restBtn = document.createElement('button');
+          restBtn.className = 'imgmgr-btn restore';
+          restBtn.textContent = 'Restore default';
+          restBtn.onclick = () => {
+            window.kttImageStore.remove(kupu);
+            buildGrid(
+              document.getElementById('imgmgr-search').value,
+              document.getElementById('imgmgr-overrides-only').checked
+            );
+          };
+          cell.append(replBtn, restBtn);
+        } else {
+          cell.appendChild(replBtn);
+        }
+
+        grid.appendChild(cell);
+      });
+    }
+
+    document.body.appendChild(overlay);
+    buildGrid('', false);
+
+    // Wire filter/search
+    filterBar.querySelector('#imgmgr-search').oninput = e =>
+      buildGrid(e.target.value, filterBar.querySelector('#imgmgr-overrides-only').checked);
+    filterBar.querySelector('#imgmgr-overrides-only').onchange = e =>
+      buildGrid(filterBar.querySelector('#imgmgr-search').value, e.target.checked);
+  }
+
   // ─── Print image sheet ────────────────────────────────────────────────────
 
   function printImageSheet() {
     const list = getActiveList();
     if (!list) { alert('No list selected'); return; }
 
-    // Build image URLs using same fallback logic as loadKupuImage
-    const EXTS = ['png','jpg','jpeg','webp'];
+    // Show a small options dialog inline
+    const existing = document.getElementById('mt-print-opts');
+    if (existing) { existing.remove(); return; }
+
+    const dlg = document.createElement('div');
+    dlg.id = 'mt-print-opts';
+    dlg.style.cssText = `
+      position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+      background:#fff; border:1px solid #ccc; border-radius:10px;
+      padding:20px; z-index:8000; box-shadow:0 4px 24px rgba(0,0,0,.18);
+      width:280px; font-family:system-ui,sans-serif; font-size:13px;
+    `;
+
+    dlg.innerHTML = `
+      <div style="font-weight:700;font-size:14px;margin-bottom:12px">Print options</div>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="po-header" checked> Include UC header
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="po-labels" checked> Show kupu labels
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+        <input type="checkbox" id="po-listname" checked> Show list name
+      </label>
+      <div style="display:flex;gap:8px">
+        <button id="po-cancel" style="flex:1;padding:7px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer">Cancel</button>
+        <button id="po-print" style="flex:2;padding:7px;border:none;border-radius:6px;background:#1a5fa5;color:#fff;font-weight:700;cursor:pointer">Print</button>
+      </div>
+    `;
+
+    document.body.appendChild(dlg);
+
+    document.getElementById('po-cancel').onclick = () => dlg.remove();
+    document.getElementById('po-print').onclick = () => {
+      const showHeader   = document.getElementById('po-header').checked;
+      const showLabels_p = document.getElementById('po-labels').checked;
+      const showListName = document.getElementById('po-listname').checked;
+      dlg.remove();
+      doPrint(list, showHeader, showLabels_p, showListName);
+    };
+
+    // Close on backdrop click
+    const backdrop = document.createElement('div');
+    backdrop.style.cssText = 'position:fixed;inset:0;z-index:7999';
+    backdrop.onclick = () => { dlg.remove(); backdrop.remove(); };
+    document.body.insertBefore(backdrop, dlg);
+  }
+
+  function doPrint(list, showHeader, showLabels_p, showListName) {
+    const n = list.kupu.length;
+    // Choose columns: 5 for 15 kupu, 4 for ≤12, 3 for ≤9
+    const cols = n <= 9 ? 3 : n <= 12 ? 4 : 5;
 
     const cells = list.kupu.map(kupu => {
-      // Try to find what extension the image actually has by building candidates
-      // In print context we can't do async fallback, so we emit all as <img> with onerror
-      const imgTag = `<img src="Images/${encodeURIComponent(kupu)}.png"
-        onerror="
-          var exts=['jpg','jpeg','webp'];
-          var tried=this.dataset.tried?parseInt(this.dataset.tried):0;
-          if(tried<exts.length){this.dataset.tried=tried+1;this.src='Images/${encodeURIComponent(kupu)}.'+exts[tried];}
-          else this.style.visibility='hidden';"
-        alt="${kupu}">`;
-      return `<div class="cell">${imgTag}<div class="lbl">${kupu}</div></div>`;
+      const lbl = showLabels_p ? `<div class="lbl">${kupu}</div>` : '';
+      return `<div class="cell">
+        <img src="Images/${encodeURIComponent(kupu)}.png"
+          onerror="var e=['jpg','jpeg','webp'],t=+(this.dataset.t||0);t<e.length?(this.dataset.t=t+1,this.src='Images/${encodeURIComponent(kupu)}.'+e[t]):this.style.visibility='hidden'"
+          alt="${kupu}">
+        ${lbl}
+      </div>`;
     }).join('');
+
+    const headerHTML = showHeader ? `
+      <header>
+        <img src="UClogo.png" alt="UC">
+        <div>
+          <div style="font-size:12px;font-weight:700">Te reo Māori Kendall Toy Test</div>
+          ${showListName ? `<div style="font-size:10px;color:#bbb">${list.name}</div>` : ''}
+        </div>
+      </header>` : (showListName ? `<div style="font-size:9px;color:#bbb;margin-bottom:4px">${list.name}</div>` : '');
 
     const win = window.open('', '_blank');
     if (!win) { alert('Please allow popups to print'); return; }
     win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
       <title>KTT — ${list.name}</title>
       <style>
-        @page { size: A4 landscape; margin: 1cm; }
-        body { font-family: system-ui, sans-serif; margin: 0; padding: 0; }
-        header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-        header img { height: 36px; }
-        header h2 { font-size: 13px; margin: 0; color: #111; }
-        header .list-name { font-size: 12px; color: #bbb; margin-left: 4px; }
-        .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
-        .cell { border: 1px solid #ddd; border-radius: 6px; padding: 6px; text-align: center; }
-        .cell img { width: 100%; aspect-ratio: 1; object-fit: contain; }
-        .lbl { font-size: 10px; color: #bbb; margin-top: 3px; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        @page { size: A4 landscape; margin: 0.7cm; }
+        body { font-family: system-ui, sans-serif; }
+        header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        header img { height: 28px; }
+        .grid {
+          display: grid;
+          grid-template-columns: repeat(${cols}, 1fr);
+          gap: 5px;
+          height: calc(100vh - ${showHeader || showListName ? '48px' : '0px'});
+        }
+        .cell {
+          border: 1px solid #ddd; border-radius: 5px; padding: 4px;
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          overflow: hidden;
+        }
+        .cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; }
+        .lbl { font-size: 9px; color: #bbb; margin-top: 2px; flex-shrink: 0; }
       </style></head><body>
-      <header>
-        <img src="UClogo.png" alt="UC">
-        <h2>Te reo Māori Kendall Toy Test
-          <span class="list-name">— ${list.name}</span>
-        </h2>
-      </header>
+      ${headerHTML}
       <div class="grid">${cells}</div>
       </body></html>`);
     win.document.close();
