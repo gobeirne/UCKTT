@@ -19,13 +19,55 @@
   let pendingResponse = null;      // kupu the responder tapped, awaiting confirm
 
   // Responder-side state
-  let respKupu     = [];     // current 15 kupu
-  let respArmed    = false;  // grid is accepting taps
-  let respTapped   = null;   // which kupu was tapped
+  let respKupu      = [];
+  let respArmed     = false;
+  let respTapped    = null;
+  let respConfirmed = false;  // true after clinician confirms — blocks re-tap
 
   // Audio (responder plays these)
   let respCarrier  = null;
   let respKupuAud  = null;
+  let _audioCtx    = null;   // unlocked AudioContext (iOS workaround)
+
+  // Call on first user gesture on the responder device to unlock iOS audio
+  function unlockAudio() {
+    if (_audioCtx) return;
+    try {
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // Play a silent buffer — this is the gesture-triggered unlock
+      const buf = _audioCtx.createBuffer(1, 1, 22050);
+      const src = _audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(_audioCtx.destination);
+      src.start(0);
+      // Resume in case it started suspended
+      if (_audioCtx.state === 'suspended') _audioCtx.resume();
+    } catch (_) {}
+  }
+
+  // iOS-safe play: use a fetch+decodeAudioData approach via the unlocked context
+  function playAudioIOS(url) {
+    return new Promise((resolve, reject) => {
+      if (!_audioCtx) {
+        // Fall back to standard Audio element if no context yet
+        const a = new Audio(url);
+        a.play().catch(reject);
+        a.onended = resolve;
+        return;
+      }
+      fetch(url)
+        .then(r => r.arrayBuffer())
+        .then(buf => _audioCtx.decodeAudioData(buf))
+        .then(decoded => {
+          const src = _audioCtx.createBufferSource();
+          src.buffer = decoded;
+          src.connect(_audioCtx.destination);
+          src.onended = resolve;
+          src.start(0);
+        })
+        .catch(reject);
+    });
+  }
 
   // ─── Public API (called from manualTest.js) ───────────────────────────────
 
@@ -404,9 +446,8 @@
   function onKttResponse(p) {
     if (pairRole !== 'controller') return;
     pendingResponse = p.kupu;
-    // Highlight the tapped kupu row in amber in the scoring table
     refreshControllerHighlight(p.kupu);
-    // Notify manualTest.js
+    // Update confirm bar — works for both first response and changes
     if (typeof window.kttManual?.onPairResponse === 'function') {
       window.kttManual.onPairResponse(p.kupu);
     }
@@ -432,17 +473,7 @@
     respArmed  = false;
     respTapped = null;
     stopRespAudio();
-    // Ensure the responder view is visible and showing waiting state
     activateResponderMode();
-    // Show which list is coming next if we know
-    const view = document.getElementById('ktt-responder-view');
-    if (view && p.listName) {
-      const hint = document.createElement('div');
-      hint.style.cssText = 'font-size:13px;color:#aaa;margin-top:8px';
-      hint.textContent = `Next list: ${p.listName}`;
-      const waiting = view.querySelector('.resp-waiting');
-      if (waiting) waiting.appendChild(hint);
-    }
   }
 
   function onKttSync(p) {
@@ -468,8 +499,9 @@
 
   function onKttPlay(p) {
     if (pairRole !== 'responder') return;
-    respArmed  = false;
-    respTapped = null;
+    respArmed     = false;
+    respTapped    = null;
+    respConfirmed = false;
     // Clear any previous highlight
     document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => {
       c.classList.remove('resp-tapped', 'resp-correct', 'resp-incorrect');
@@ -477,21 +509,31 @@
 
     if (p.playAudio) {
       stopRespAudio();
-      respCarrier = new Audio(CARRIER_URL);
-      respKupuAud = new Audio(`${AUDIO_DIR}/${encodeURIComponent(p.kupu)}.mp3`);
-      respCarrier.play().catch(() => {});
-      respCarrier.onended = () => {
-        respKupuAud.play().catch(() => {});
-        respKupuAud.onended = () => { respArmed = true; };
-      };
+      const carrierURL = CARRIER_URL;
+      const kupuURL    = `${AUDIO_DIR}/${encodeURIComponent(p.kupu)}.mp3`;
+
+      // Show a "tap to play" prompt if audio context not yet unlocked (iOS first play)
+      if (!_audioCtx) {
+        showRespAudioPrompt(() => {
+          playAudioIOS(carrierURL)
+            .then(() => playAudioIOS(kupuURL))
+            .then(() => { respArmed = true; })
+            .catch(() => { respArmed = true; });
+        });
+      } else {
+        playAudioIOS(carrierURL)
+          .then(() => playAudioIOS(kupuURL))
+          .then(() => { respArmed = true; })
+          .catch(() => { respArmed = true; });
+      }
     } else {
-      // Controller is playing audio — give a small delay then arm the grid
       setTimeout(() => { respArmed = true; }, 800);
     }
   }
 
   function onKttConfirm(p) {
     if (pairRole !== 'responder') return;
+    respConfirmed = true;
     const cell = document.querySelector(
       `#ktt-responder-grid [data-kupu="${CSS.escape(p.kupu || respTapped)}"]`
     );
@@ -500,10 +542,35 @@
       cell.classList.add(p.correct ? 'resp-correct' : 'resp-incorrect');
       setTimeout(() => {
         cell.classList.remove('resp-correct', 'resp-incorrect');
-        respArmed = true;
-        respTapped = null;
+        respConfirmed = false;
+        respTapped    = null;
+        respArmed     = true;
       }, 1200);
     }
+  }
+
+  function showRespAudioPrompt(onTap) {
+    const existing = document.getElementById('ktt-audio-prompt');
+    if (existing) { existing.remove(); }
+
+    const prompt = document.createElement('div');
+    prompt.id = 'ktt-audio-prompt';
+    prompt.style.cssText = `
+      position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      font-family:system-ui,sans-serif;color:#fff;text-align:center;padding:24px;
+    `;
+    prompt.innerHTML = `
+      <div style="font-size:52px;margin-bottom:16px">🔊</div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:8px">Tap to enable sound</div>
+      <div style="font-size:14px;color:rgba(255,255,255,.8)">Your device needs a tap to allow audio</div>
+    `;
+    prompt.onclick = () => {
+      unlockAudio();
+      prompt.remove();
+      onTap();
+    };
+    document.body.appendChild(prompt);
   }
 
   function stopRespAudio() {
@@ -586,21 +653,45 @@
     view.appendChild(grid);
     // Mark grid interactive immediately — first play will arm it properly
     respArmed = false;
+
+    // Show a one-time audio unlock prompt at the bottom for iOS
+    if (!_audioCtx) {
+      const hint = document.createElement('div');
+      hint.id = 'ktt-audio-hint';
+      hint.style.cssText = `
+        position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+        background:rgba(0,0,0,.7);color:#fff;font-family:system-ui,sans-serif;
+        font-size:13px;padding:8px 18px;border-radius:999px;z-index:6000;
+        pointer-events:none;
+      `;
+      hint.textContent = '🔊 Tap any image to enable audio';
+      view.appendChild(hint);
+      // Remove after first tap (unlockAudio called in onResponderTap)
+      const removeHint = () => { hint.remove(); view.removeEventListener('click', removeHint); };
+      view.addEventListener('click', removeHint);
+    }
   }
 
   function onResponderTap(kupu) {
-    if (!respArmed || respTapped) return;
-    respArmed  = false;
-    respTapped = kupu;
+    // Unlock iOS audio on every tap (safe to call multiple times)
+    unlockAudio();
 
-    // Highlight tapped cell amber
+    // Grid must be armed (i.e. a play has happened)
+    if (!respArmed) return;
+    // If clinician has already confirmed, don't allow changes
+    if (respConfirmed) return;
+
+    // Allow changing — clear previous highlight
     document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => {
       c.classList.remove('resp-tapped');
     });
+
+    respTapped = kupu;
+
     const cell = document.querySelector(`#ktt-responder-grid [data-kupu="${CSS.escape(kupu)}"]`);
     if (cell) cell.classList.add('resp-tapped');
 
-    // Send response to controller
+    // Send/update response to controller — controller confirm bar updates each time
     if (pairSecure) pairEl.send('ktt-response', { kupu, ts: Date.now() });
   }
 
