@@ -315,19 +315,22 @@
   .mt-leg-pip.empty     { background: #f0f0f0; }
 
   @media (max-width: 700px) {
-    /* On mobile the whole page scrolls — remove fixed height containers */
     #manualSetupView, #manualTestView {
       height: auto; overflow: visible;
     }
-
-    /* Setup screen — stack left then right */
     .mt-setup-body {
       grid-template-columns: 1fr;
       grid-template-rows: auto auto;
       overflow: visible;
+      min-height: 0;
     }
-    .mt-setup-left  { border-right: none; border-bottom: 1px solid #e0e0e0; overflow-y: visible; height: auto; }
-    .mt-setup-right { border-top: none; overflow-y: visible; height: auto; }
+    .mt-setup-left  {
+      border-right: none; border-bottom: 1px solid #e0e0e0;
+      overflow-y: visible; height: auto; min-height: 0;
+    }
+    .mt-setup-right {
+      border-top: none; overflow-y: visible; height: auto; min-height: 0;
+    }
 
     /* UC header — tighten up */
     .mt-uc-header { padding: 8px 12px; gap: 8px; }

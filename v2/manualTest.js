@@ -65,7 +65,8 @@
   const SESSION_MAX_AGE  = 24 * 60 * 60 * 1000;   // 24 hours
   const SESSION_MAX_COUNT = 20;
 
-  let currentSessionId = null;   // set when a test starts, used for autosave
+  let currentSessionId = null;
+  let sessionSaved     = false;  // true once saveResults() has been called this session
   function loadClinicSettings() {
     try { return JSON.parse(localStorage.getItem(LS_KEY_CLINIC) || '{}'); } catch { return {}; }
   }
@@ -147,7 +148,7 @@
   }
 
   function hasUnsavedScores() {
-    return levelsUsed.length > 0 && currentSessionId !== null;
+    return levelsUsed.length > 0 && currentSessionId !== null && !sessionSaved;
   }
 
   function loadSettings() {
@@ -423,6 +424,7 @@
     right.appendChild(sect('', renderActions()));
     right.appendChild(sect('Clinic / report settings', renderClinicSettings()));
     right.appendChild(sect('Custom lists', renderImportExport()));
+    right.appendChild(sect('Results', renderResultsImport()));
   }
 
   function renderClientForm() {
@@ -631,6 +633,47 @@
     return card;
   }
 
+  function renderResultsImport() {
+    const card = el('div', { cls: 'mt-card' });
+    card.appendChild(el('div', { cls: 'mt-hint-text', style: 'margin-bottom:8px' },
+      'Open a previously saved KTT JSON file to regenerate the report.'));
+    card.appendChild(el('button', { cls: 'mt-btn', style: 'width:100%',
+      onclick: importAndShowReport
+    }, '📂 Open saved results…'));
+    return card;
+  }
+
+  function importAndShowReport() {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.json';
+    inp.onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          // Validate it looks like a KTT results file
+          if (!data.test || !data.scores) {
+            alert('This doesn\'t look like a KTT results file.');
+            return;
+          }
+          // Restore custom images from the file if present
+          if (data.custom_images && window.kttImageStore) {
+            Object.entries(data.custom_images).forEach(([kupu, dataURL]) => {
+              window.kttImageStore.set(kupu, dataURL);
+            });
+          }
+          openPrintReport(data);
+        } catch (err) {
+          alert('Could not read file: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+    };
+    inp.click();
+  }
+
   function renderClinicSettings() {
     const C = loadClinicSettings();
     const card = el('div', { cls: 'mt-card' });
@@ -717,6 +760,7 @@
     scores           = {};
     levelsUsed       = [];
     armedKupu        = null;
+    sessionSaved     = false;
     currentSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     currentLevel     = DEFAULT_LEVEL;
     const S = loadSettings();
@@ -1372,7 +1416,7 @@
 
   // ─── Save results ─────────────────────────────────────────────────────────
 
-  function buildResultsJSON() {
+  function buildResultsJSON(includeImages) {
     const list = getActiveList();
     const now  = new Date();
     const scoringGrid = {};
@@ -1388,20 +1432,35 @@
         if (Object.keys(byLevel).length) scoringGrid[kupu] = byLevel;
       });
     }
+
+    const clinicSettings = loadClinicSettings();
+
+    // Optionally embed custom image overrides for full traceability
+    let customImages = undefined;
+    if (includeImages && window.kttImageStore) {
+      const overrides = window.kttImageStore.all();
+      const relevant  = list?.kupu || [];
+      customImages    = Object.fromEntries(
+        Object.entries(overrides).filter(([k]) => relevant.includes(k))
+      );
+      if (!Object.keys(customImages).length) customImages = undefined;
+    }
+
     return {
-      schema_version: 1,
-      exported_at: now.toISOString(),
-      client: { ...sessionMeta },
-      clinic: loadClinicSettings(),
+      schema_version: 2,
+      exported_at:    now.toISOString(),
+      client:         { ...sessionMeta },
+      clinic:         clinicSettings,
       test: {
-        list_name: list?.name || 'unknown',
-        list_id:   list?.id   || 'unknown',
-        kupu:      list?.kupu || [],
+        list_name:    list?.name || 'unknown',
+        list_id:      list?.id   || 'unknown',
+        kupu:         list?.kupu || [],
         scoring_mode: scoringMode,
         levels_used:  levelsUsed.slice(),
       },
-      notes: sessionNotes,
-      scores: scoringGrid,
+      notes:          sessionNotes,
+      scores:         scoringGrid,
+      ...(customImages ? { custom_images: customImages } : {}),
     };
   }
 
@@ -1447,19 +1506,75 @@
   }
 
   function saveResults() {
-    const data = buildResultsJSON();
-    const ts   = new Date().toISOString().replace(/[:.]/g, '-');
-    const slug = (sessionMeta.clientName || 'client').replace(/\s+/g, '_');
+    sessionSaved = true;
+    showSaveDialog();
+  }
 
-    // Always download the verbose JSON for record-keeping
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  function showSaveDialog() {
+    const existing = document.getElementById('ktt-save-dialog');
+    if (existing) existing.remove();
+
+    const dlg = document.createElement('div');
+    dlg.id = 'ktt-save-dialog';
+    dlg.style.cssText = `
+      position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9100;
+      display:flex;align-items:center;justify-content:center;padding:20px;
+      font-family:system-ui,sans-serif;
+    `;
+    dlg.innerHTML = `
+      <div style="background:#fff;border-radius:12px;padding:24px;max-width:340px;width:100%;
+        box-shadow:0 4px 32px rgba(0,0,0,.2)">
+        <div style="font-size:16px;font-weight:700;margin-bottom:16px">Save results</div>
+        <label style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;cursor:pointer">
+          <input type="checkbox" id="sd-include-images" style="margin-top:3px">
+          <div>
+            <div style="font-size:13px;font-weight:600">Include custom images</div>
+            <div style="font-size:11px;color:#888">Embeds any custom images in the JSON for full traceability. Makes the file larger.</div>
+          </div>
+        </label>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px">
+          <button id="sd-json" style="padding:10px;border:1px solid #ccc;border-radius:8px;
+            background:#fff;font-size:14px;cursor:pointer;text-align:left">
+            ↓ Download JSON (for records)
+          </button>
+          <button id="sd-print" style="padding:10px;border:none;border-radius:8px;
+            background:#1a5fa5;color:#fff;font-size:14px;font-weight:700;cursor:pointer">
+            🖨 Save &amp; open print report
+          </button>
+          <button id="sd-cancel" style="padding:8px;border:none;background:none;
+            color:#1a5fa5;font-size:13px;cursor:pointer">
+            Cancel
+          </button>
+        </div>
+      </div>`;
+    document.body.appendChild(dlg);
+
+    const includeImages = () => document.getElementById('sd-include-images').checked;
+
+    document.getElementById('sd-cancel').onclick = () => dlg.remove();
+
+    document.getElementById('sd-json').onclick = () => {
+      const data = buildResultsJSON(includeImages());
+      downloadJSON(data);
+      dlg.remove();
+    };
+
+    document.getElementById('sd-print').onclick = () => {
+      const data = buildResultsJSON(includeImages());
+      downloadJSON(data);
+      dlg.remove();
+      openPrintReport(data);
+    };
+  }
+
+  function downloadJSON(data) {
+    const ts   = new Date().toISOString().replace(/[:.]/g, '-');
+    const slug = (data.client?.clientName || 'client').replace(/\s+/g, '_');
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     a.download = `KTT_${slug}_${ts}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-
-    // Open the print/PDF report in a new window
-    openPrintReport(data);
   }
 
   function openPrintReport(data) {
