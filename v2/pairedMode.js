@@ -158,12 +158,23 @@
     kttLog('🔑', 'Responder: saved reconnect secret:', p.secret);
   }
 
+  let _pairElAppended = false;
+
+  function appendPairEl() {
+    if (_pairElAppended) return;
+    kttLog('🔌', 'Appending pairEl to DOM (once)');
+    document.body.appendChild(pairEl);
+    _pairElAppended = true;
+  }
+
   async function getFB() {
+    // Only ever append pairEl to DOM once — re-appending re-triggers connectedCallback
+    // which re-initialises WebRTC machinery and causes disconnect event storms
+    appendPairEl();
     if (pairEl._fb?.initialized) {
       kttLog('🔥', 'Firebase already initialized');
       return pairEl._fb;
     }
-    if (!pairEl.parentNode) { kttLog('🔥', 'Appending pairEl for Firebase init'); document.body.appendChild(pairEl); }
     kttLog('🔥', 'Waiting for Firebase + auth to init (up to 4s)…');
     for (let i = 0; i < 40; i++) {
       await new Promise(r => setTimeout(r, 100));
@@ -189,10 +200,7 @@
 
     showFastReconnectUI('Checking for saved device…');
 
-    if (!pairEl.parentNode) {
-      kttLog('⚡', 'Appending pairEl to DOM for Firebase access');
-      document.body.appendChild(pairEl);
-    }
+    appendPairEl();
 
     const fb = await getFB();
     if (!fb) {
@@ -264,10 +272,7 @@
     const beaconId = FB_KEY_PREFIX + secret + '_ctrl';
     const replyId  = FB_KEY_PREFIX + secret + '_resp';
 
-    if (!pairEl.parentNode) {
-      kttLog('📡', 'Appending pairEl to DOM for Firebase access');
-      document.body.appendChild(pairEl);
-    }
+    appendPairEl();
 
     const fb = await getFB();
     if (!fb) {
@@ -406,17 +411,18 @@
     const state = loadReconnectState();
     kttLog('📱', 'openPairModal — saved state:', state, '| pairSecure:', pairSecure);
 
+    const alreadyInDOM = _pairElAppended;
+
     if (state?.secret && state.role === 'controller' && !pairSecure) {
       kttLog('⚡', 'Attempting fast reconnect before opening modal');
-      attemptFastReconnect().then(found => {
-        kttLog('⚡', 'Fast reconnect result:', found ? 'succeeded' : 'failed/timed out', '— opening modal');
-        if (!pairEl.parentNode) document.body.appendChild(pairEl);
-        else pairEl.open();
+      attemptFastReconnect().then(() => {
+        appendPairEl();
+        if (alreadyInDOM) pairEl.open();
       });
     } else {
-      kttLog('📱', 'Opening modal directly (no saved state or already connected)');
-      if (!pairEl.parentNode) document.body.appendChild(pairEl);
-      else pairEl.open();
+      kttLog('📱', 'Opening modal directly');
+      appendPairEl();
+      if (alreadyInDOM) pairEl.open();
     }
   }
 
@@ -449,10 +455,17 @@
     }
   }
 
+  let _disconnectDebounce = null;
+
   function onDisconnected() {
-    pairSecure = false;
-    kttLog('❌', 'DISCONNECTED');
-    updateStatusBadge('disconnected');
+    // Debounce — RapidPair can fire this many times rapidly during ICE failures
+    clearTimeout(_disconnectDebounce);
+    _disconnectDebounce = setTimeout(() => {
+      if (pairSecure) return; // reconnected in the meantime
+      pairSecure = false;
+      kttLog('❌', 'DISCONNECTED');
+      updateStatusBadge('disconnected');
+    }, 500);
   }
 
   function onReconnected(e) {
