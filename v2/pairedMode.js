@@ -376,9 +376,30 @@
     }
 
     if (savedState?.secret && savedState.role === 'responder') {
-      kttLog('📡', 'Scheduling responder beacon check in 2s');
-      setTimeout(responderCheckBeacon, 2000);
+      kttLog('📡', 'Starting responder beacon poll (every 15s while unconnected)');
+      // First check after 2s (Firebase needs time to init), then every 15s
+      setTimeout(startResponderBeaconPoll, 2000);
     }
+  }
+
+  let _beaconPollTimer = null;
+
+  function startResponderBeaconPoll() {
+    if (pairSecure) {
+      kttLog('📡', 'Already connected — not starting beacon poll');
+      return;
+    }
+    responderCheckBeacon();
+    _beaconPollTimer = setInterval(() => {
+      if (pairSecure) {
+        kttLog('📡', 'Connected — stopping beacon poll');
+        clearInterval(_beaconPollTimer);
+        _beaconPollTimer = null;
+        return;
+      }
+      kttLog('📡', 'Beacon poll tick');
+      responderCheckBeacon();
+    }, 15000);
   }
 
   function openPairModal() {
@@ -408,6 +429,12 @@
   function onSecure(e) {
     pairRole   = e.detail.role;
     pairSecure = true;
+    // Stop beacon polling if running
+    if (_beaconPollTimer) {
+      clearInterval(_beaconPollTimer);
+      _beaconPollTimer = null;
+      kttLog('📡', 'Beacon poll stopped — now connected');
+    }
     kttLog('🔒', 'SECURE — role:', pairRole, '| verifyCode:', e.detail.verifyCode);
     updateStatusBadge('connected');
 
@@ -698,6 +725,7 @@
         <div style="font-size:20px;font-weight:700;color:#333">Waiting for clinician…</div>
         <div style="font-size:14px;color:#888;margin-top:8px">🔒 Securely connected</div>
       </div>`;
+      addResponderDebugGesture(view);
       return;
     }
 
@@ -742,9 +770,54 @@
     view.appendChild(grid);
     respArmed = false;
 
-    // Always show "Tap here to commence" — unlocks iOS audio on first render,
-    // and signals readiness to controller on every new test/list
+    // Invisible triple-tap zone top-right — opens debug panel without disrupting session
+    addResponderDebugGesture(view);
+
+    // Always show "Tap here to commence"
     showCommenceOverlay();
+  }
+
+  function addResponderDebugGesture(view) {
+    // Remove any existing gesture zone
+    const existing = view.querySelector('.resp-debug-zone');
+    if (existing) existing.remove();
+
+    const zone = document.createElement('div');
+    zone.className = 'resp-debug-zone';
+    zone.style.cssText = `
+      position:fixed;top:0;right:0;width:60px;height:60px;z-index:7000;
+      cursor:default;-webkit-tap-highlight-color:transparent;
+    `;
+
+    let tapCount = 0;
+    let tapTimer = null;
+
+    zone.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      tapCount++;
+      clearTimeout(tapTimer);
+      if (tapCount >= 3) {
+        tapCount = 0;
+        kttLog('🐛', 'Triple-tap debug gesture detected on responder');
+        window.kttDebugPanel?.toggle();
+      } else {
+        tapTimer = setTimeout(() => { tapCount = 0; }, 600);
+      }
+    });
+
+    // Also works with mouse for desktop testing
+    zone.addEventListener('click', () => {
+      tapCount++;
+      clearTimeout(tapTimer);
+      if (tapCount >= 3) {
+        tapCount = 0;
+        window.kttDebugPanel?.toggle();
+      } else {
+        tapTimer = setTimeout(() => { tapCount = 0; }, 600);
+      }
+    });
+
+    document.body.appendChild(zone);
   }
 
   function showCommenceOverlay() {

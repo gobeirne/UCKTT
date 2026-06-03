@@ -60,7 +60,12 @@
   let kupuAudio     = null;
 
   // Clinic settings — persisted separately, survive across sessions
-  const LS_KEY_CLINIC = 'ktt_clinic_settings_v1';
+  const LS_KEY_CLINIC    = 'ktt_clinic_settings_v1';
+  const LS_KEY_SESSIONS  = 'ktt_recent_sessions_v1';
+  const SESSION_MAX_AGE  = 24 * 60 * 60 * 1000;   // 24 hours
+  const SESSION_MAX_COUNT = 20;
+
+  let currentSessionId = null;   // set when a test starts, used for autosave
   function loadClinicSettings() {
     try { return JSON.parse(localStorage.getItem(LS_KEY_CLINIC) || '{}'); } catch { return {}; }
   }
@@ -69,7 +74,81 @@
     localStorage.setItem(LS_KEY_CLINIC, JSON.stringify({ ...cur, ...patch }));
   }
 
-  // ─── localStorage ─────────────────────────────────────────────────────────
+  // ─── Session autosave ─────────────────────────────────────────────────────
+
+  function loadSessions() {
+    try { return JSON.parse(localStorage.getItem(LS_KEY_SESSIONS) || '[]'); } catch { return []; }
+  }
+
+  function pruneSessions(sessions) {
+    const cutoff = Date.now() - SESSION_MAX_AGE;
+    return sessions
+      .filter(s => s.savedAt > cutoff)
+      .slice(0, SESSION_MAX_COUNT);
+  }
+
+  function autosaveSession() {
+    if (!currentSessionId) return;
+    const list = getActiveList();
+    if (!list) return;
+    // Count how many pips have been filled to decide if worth saving
+    const pipCount = Object.values(scores)
+      .flatMap(byLevel => Object.values(byLevel))
+      .reduce((n, pips) => n + pips.filter(p => p !== 'empty').length, 0);
+    if (pipCount === 0 && levelsUsed.length === 0) return;  // nothing to save yet
+
+    const session = {
+      sessionId:   currentSessionId,
+      savedAt:     Date.now(),
+      listId:      list.id,
+      listName:    list.name,
+      listKupu:    list.kupu,
+      scores,
+      levelsUsed,
+      currentLevel,
+      notes:       sessionNotes,
+      scoringMode,
+      showLabels,
+      clinicianViewMode,
+      pipCount,
+    };
+
+    const existing = loadSessions().filter(s => s.sessionId !== currentSessionId);
+    const updated  = pruneSessions([session, ...existing]);
+    try {
+      localStorage.setItem(LS_KEY_SESSIONS, JSON.stringify(updated));
+    } catch (e) {
+      console.warn('[KTT] Session autosave failed (storage full?):', e.message);
+    }
+  }
+
+  function restoreSession(session) {
+    // Restore scoring state from a saved session (no PII restored)
+    const list = allLists.find(l => l.id === session.listId) ||
+      { id: session.listId, name: session.listName, kupu: session.listKupu, builtin: false };
+    activeListId      = session.listId;
+    scores            = session.scores || {};
+    levelsUsed        = session.levelsUsed || [];
+    currentLevel      = session.currentLevel || DEFAULT_LEVEL;
+    sessionNotes      = session.notes || '';
+    scoringMode       = session.scoringMode || 'free';
+    showLabels        = session.showLabels !== undefined ? session.showLabels : true;
+    clinicianViewMode = session.clinicianViewMode || 'words';
+    currentSessionId  = session.sessionId;
+    armedKupu         = null;
+    saveSettings({ activeListId, scoringMode, showLabels, clinicianViewMode });
+    renderTestScreen();
+    showView('manualTestView');
+  }
+
+  function deleteSession(sessionId) {
+    const updated = loadSessions().filter(s => s.sessionId !== sessionId);
+    localStorage.setItem(LS_KEY_SESSIONS, JSON.stringify(updated));
+  }
+
+  function hasUnsavedScores() {
+    return levelsUsed.length > 0 && currentSessionId !== null;
+  }
 
   function loadSettings() {
     try { return JSON.parse(localStorage.getItem(LS_KEY_SETTINGS) || '{}'); } catch { return {}; }
@@ -122,6 +201,7 @@
     if (idx >= pips.length) return;
     const cur = pips[idx];
     pips[idx] = cur === 'empty' ? 'correct' : cur === 'correct' ? 'incorrect' : 'empty';
+    autosaveSession();
   }
 
   function levelTally(level) {
@@ -139,6 +219,69 @@
   }
 
   // ─── Audio ────────────────────────────────────────────────────────────────
+
+  function navigateToSetup() {
+    stopAudio();
+    if (hasUnsavedScores()) {
+      // Show a non-blocking prompt — three choices
+      showUnsavedPrompt(
+        () => {
+          // Save then go
+          saveResults();
+          renderSetupScreen();
+          showView('manualSetupView');
+        },
+        () => {
+          // Discard — session already autosaved, just navigate
+          renderSetupScreen();
+          showView('manualSetupView');
+        }
+        // Cancel: do nothing, stay on test screen
+      );
+    } else {
+      renderSetupScreen();
+      showView('manualSetupView');
+    }
+  }
+
+  function showUnsavedPrompt(onSave, onDiscard) {
+    const existing = document.getElementById('ktt-unsaved-prompt');
+    if (existing) existing.remove();
+
+    const dlg = document.createElement('div');
+    dlg.id = 'ktt-unsaved-prompt';
+    dlg.style.cssText = `
+      position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9100;
+      display:flex;align-items:center;justify-content:center;padding:20px;
+    `;
+    dlg.innerHTML = `
+      <div style="background:#fff;border-radius:12px;padding:24px;max-width:340px;width:100%;
+        font-family:system-ui,sans-serif;box-shadow:0 4px 32px rgba(0,0,0,.2)">
+        <div style="font-size:16px;font-weight:700;margin-bottom:8px">Unsaved results</div>
+        <div style="font-size:14px;color:#555;margin-bottom:20px;line-height:1.5">
+          This session has unsaved scores. Results are autosaved locally and available
+          in Recent sessions, but you should save or print before leaving.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="usp-save" style="padding:10px;border:none;border-radius:8px;
+            background:#1a5fa5;color:#fff;font-size:14px;font-weight:700;cursor:pointer">
+            Save &amp; print results
+          </button>
+          <button id="usp-discard" style="padding:10px;border:1px solid #ccc;border-radius:8px;
+            background:#fff;color:#555;font-size:14px;cursor:pointer">
+            Leave without saving
+          </button>
+          <button id="usp-cancel" style="padding:10px;border:none;border-radius:8px;
+            background:none;color:#1a5fa5;font-size:14px;cursor:pointer">
+            Cancel — stay on test
+          </button>
+        </div>
+      </div>`;
+    document.body.appendChild(dlg);
+    document.getElementById('usp-save').onclick    = () => { dlg.remove(); onSave(); };
+    document.getElementById('usp-discard').onclick = () => { dlg.remove(); onDiscard(); };
+    document.getElementById('usp-cancel').onclick  = () => dlg.remove();
+  }
 
   function stopAudio() {
     [carrierAudio, kupuAudio].forEach(a => { if (a) { a.pause(); a.currentTime = 0; } });
@@ -269,6 +412,11 @@
     left.appendChild(sect('Test list', renderListSelector()));
     left.appendChild(sect('Scoring method', renderScoringSelector()));
 
+    const recentSessions = pruneSessions(loadSessions());
+    if (recentSessions.length) {
+      left.appendChild(sect('Recent sessions (last 24h)', renderRecentSessions(recentSessions)));
+    }
+
     const right = el('div', { cls: 'mt-setup-right' });
     body.appendChild(right);
     right.appendChild(sect('Clinician view during test', renderViewToggle()));
@@ -386,6 +534,52 @@
     const soon = el('span', { style: 'display:inline-block;margin-top:5px;font-size:10px;padding:2px 7px;background:#f0f0f0;border-radius:10px;color:#888' }, 'Coming soon');
     ghost.appendChild(soon);
     wrap.appendChild(ghost);
+
+    return wrap;
+  }
+
+  function renderRecentSessions(sessions) {
+    const wrap = el('div', { cls: 'mt-card', style: 'padding:6px 8px' });
+
+    sessions.forEach(s => {
+      const age    = Date.now() - s.savedAt;
+      const ageStr = age < 3600000
+        ? `${Math.round(age / 60000)}m ago`
+        : `${Math.round(age / 3600000)}h ago`;
+      const scored = s.pipCount || 0;
+
+      const item = el('div', { cls: 'mt-session-item' });
+
+      const info = el('div', { cls: 'mt-session-info',
+        onclick: () => {
+          if (hasUnsavedScores()) {
+            showUnsavedPrompt(
+              () => { saveResults(); restoreSession(s); },
+              () => restoreSession(s)
+            );
+          } else {
+            restoreSession(s);
+          }
+        }
+      });
+      info.appendChild(el('div', { cls: 'mt-session-list' }, s.listName));
+      info.appendChild(el('div', { cls: 'mt-session-meta' },
+        `${ageStr} · ${scored} response${scored !== 1 ? 's' : ''} recorded`));
+
+      const delBtn = el('button', {
+        cls: 'mt-btn',
+        style: 'padding:2px 7px;font-size:11px;color:#c0392b;border-color:#e0b0b0;flex-shrink:0',
+        title: 'Delete this session',
+        onclick: e => {
+          e.stopPropagation();
+          deleteSession(s.sessionId);
+          renderSetupScreen();
+        }
+      }, '✕');
+
+      item.append(info, delBtn);
+      wrap.appendChild(item);
+    });
 
     return wrap;
   }
@@ -520,18 +714,16 @@
   // ─── TEST SCREEN ──────────────────────────────────────────────────────────
 
   function startManualTest() {
-    scores     = {};
-    levelsUsed = [];
-    armedKupu  = null;
-    currentLevel = DEFAULT_LEVEL;
+    scores           = {};
+    levelsUsed       = [];
+    armedKupu        = null;
+    currentSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    currentLevel     = DEFAULT_LEVEL;
     const S = loadSettings();
     if (S.lastLevel) currentLevel = parseInt(S.lastLevel) || DEFAULT_LEVEL;
     if (S.showLabels !== undefined) showLabels = !!S.showLabels;
 
-    // Push current list + images to responder now that test is starting
-    if (window.kttPaired?.isConnected()) {
-      window.kttPaired.sendSync();
-    }
+    if (window.kttPaired?.isConnected()) window.kttPaired.sendSync();
 
     renderTestScreen();
     showView('manualTestView');
@@ -556,7 +748,7 @@
       statusBadge.style.cssText = 'display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7';
     }
     hdrRight.appendChild(el('button', { cls: 'mt-btn',
-      onclick: () => { stopAudio(); renderSetupScreen(); showView('manualSetupView'); }
+      onclick: () => navigateToSetup()
     }, '← Setup'));
     hdrRight.appendChild(el('button', { cls: 'mt-btn-primary',
       onclick: saveResults }, '↓ Save results'));
@@ -580,7 +772,7 @@
       // Propagate to responder
       if (window.kttPaired?.isConnected()) window.kttPaired.sendDisplay(showLabels);
     };
-    labelToggle.append(labelCb, ' labels');
+    labelToggle.append(labelCb, ' labels (both screens)');
     infoBar.appendChild(labelToggle);
 
     infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
@@ -796,7 +988,7 @@
 
     // Notes
     const notesArea = el('textarea', { cls: 'mt-notes', placeholder: 'Clinical notes…',
-      oninput: e => { sessionNotes = e.target.value; }
+      oninput: e => { sessionNotes = e.target.value; autosaveSession(); }
     }, sessionNotes);
     sb.appendChild(sect('Notes', notesArea));
 
@@ -868,6 +1060,7 @@
       if (emptyIdx >= 0) {
         pips[emptyIdx] = correct ? 'correct' : 'incorrect';
         refreshScoringTable();
+        autosaveSession();
       }
     }
   }

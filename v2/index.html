@@ -257,7 +257,17 @@
   .mt-score-td.current-level { background: #f0f7ff; }
   .mt-row-armed td { background: #eef5ff !important; }
   .mt-ktable tr:hover td { background: #f8f8f8; }
-  .mt-row-clickable { cursor: pointer; }
+  .mt-session-item {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+    border-radius: 6px; border-bottom: 1px solid #f0f0f0;
+  }
+  .mt-session-item:last-child { border-bottom: none; }
+  .mt-session-info {
+    flex: 1; cursor: pointer; border-radius: 5px; padding: 2px 4px;
+  }
+  .mt-session-info:hover { background: #f0f5ff; }
+  .mt-session-list { font-size: 13px; font-weight: 700; color: #111; }
+  .mt-session-meta { font-size: 11px; color: #888; margin-top: 1px; }
   .mt-row-armed:hover td { background: #e4f0ff !important; }
 
   /* Kupu name / image */
