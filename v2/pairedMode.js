@@ -36,9 +36,10 @@
     getRole:        () => pairRole,
     sendPlay,
     sendSync,
+    sendListReset,
     sendConfirm,
-    setAudioSource, // 'controller' | 'responder'
-    statusEl:       null,   // set by init — a DOM element for status badge
+    setAudioSource,
+    statusEl:       null,
   };
 
   // ─── Init ─────────────────────────────────────────────────────────────────
@@ -66,6 +67,7 @@
     pairEl.on('ktt-image-chunk', onKttImageChunk);
     pairEl.on('ktt-play',        onKttPlay);
     pairEl.on('ktt-confirm',     onKttConfirm);
+    pairEl.on('ktt-list-reset',  onKttListReset);
     pairEl.on('ktt-list-update', onKttSync);
 
     // ?role=responder support (future)
@@ -100,10 +102,11 @@
     updateStatusBadge('connected');
 
     if (pairRole === 'controller') {
-      // Send the current list and images to responder
-      sendSync();
+      // Tell responder to show waiting state — grid populates on "Start test"
+      const list = window.kttManual?.getActiveListForPair?.();
+      sendListReset(list?.name || '');
     } else {
-      // Responder: hide clinician UI, show responder grid
+      // Responder: hide clinician UI, show waiting screen
       activateResponderMode();
     }
   }
@@ -117,7 +120,10 @@
     pairRole   = e.detail.role;
     pairSecure = true;
     updateStatusBadge('connected');
-    if (pairRole === 'controller') sendSync();
+    if (pairRole === 'controller') {
+      const list = window.kttManual?.getActiveListForPair?.();
+      sendListReset(list?.name || '');
+    }
   }
 
   // ─── Status badge ─────────────────────────────────────────────────────────
@@ -136,6 +142,11 @@
   }
 
   // ─── CONTROLLER — send helpers ────────────────────────────────────────────
+
+  function sendListReset(listName) {
+    if (!pairSecure || pairRole !== 'controller') return;
+    pairEl.send('ktt-list-reset', { listName: listName || '' });
+  }
 
   function sendSync() {
     if (!pairSecure || pairRole !== 'controller') return;
@@ -214,6 +225,25 @@
 
   // Assembled image chunks: { kupu → { parts[], total, received } }
   const _imgChunks = {};
+
+  function onKttListReset(p) {
+    if (pairRole !== 'responder') return;
+    respKupu   = [];
+    respArmed  = false;
+    respTapped = null;
+    stopRespAudio();
+    // Ensure the responder view is visible and showing waiting state
+    activateResponderMode();
+    // Show which list is coming next if we know
+    const view = document.getElementById('ktt-responder-view');
+    if (view && p.listName) {
+      const hint = document.createElement('div');
+      hint.style.cssText = 'font-size:13px;color:#aaa;margin-top:8px';
+      hint.textContent = `Next list: ${p.listName}`;
+      const waiting = view.querySelector('.resp-waiting');
+      if (waiting) waiting.appendChild(hint);
+    }
+  }
 
   function onKttSync(p) {
     if (pairRole !== 'responder') return;

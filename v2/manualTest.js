@@ -304,7 +304,15 @@
 
     function listItem(list) {
       const item = el('div', { cls: 'mt-list-item' + (list.id === activeListId ? ' active' : ''),
-        onclick: () => { activeListId = list.id; saveSettings({ activeListId }); renderSetupScreen(); }
+        onclick: () => {
+          activeListId = list.id;
+          saveSettings({ activeListId });
+          // If paired, tell responder to go back to waiting — new list not started yet
+          if (window.kttPaired?.isConnected()) {
+            window.kttPaired.sendListReset(list.name);
+          }
+          renderSetupScreen();
+        }
       });
       const dot  = el('div', { cls: 'mt-list-dot ' + (list.builtin ? 'builtin' : 'custom') });
       const name = el('div', { cls: 'mt-list-name' }, list.name);
@@ -489,6 +497,12 @@
     const S = loadSettings();
     if (S.lastLevel) currentLevel = parseInt(S.lastLevel) || DEFAULT_LEVEL;
     if (S.showLabels !== undefined) showLabels = !!S.showLabels;
+
+    // Push current list + images to responder now that test is starting
+    if (window.kttPaired?.isConnected()) {
+      window.kttPaired.sendSync();
+    }
+
     renderTestScreen();
     showView('manualTestView');
   }
