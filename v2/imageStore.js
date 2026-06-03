@@ -149,7 +149,8 @@
 .kr-btn-danger:hover { background: #fde8e8; }
 .kr-size-warn {
   font-size: 11px; color: #b05800; background: #fff8ee; border: 1px solid #f0c070;
-  border-radius: 5px; padding: 5px 9px; font-family: system-ui, sans-serif; display: none;
+  border-radius: 5px; padding: 7px 9px; font-family: system-ui, sans-serif;
+  display: flex; flex-direction: column; gap: 5px;
 }
     `;
     document.head.appendChild(s);
@@ -191,8 +192,9 @@
             <input class="kr-file-input" id="kr-file-input" type="file" accept="image/*">
           </div>
 
-          <div class="kr-size-warn" id="kr-size-warn">
-            This image is large (over 500 KB). It will still work but may slow down the app.
+          <div class="kr-size-warn" id="kr-size-warn" style="display:none">
+            <span id="kr-size-warn-text"></span>
+            <button class="kr-btn" id="kr-compress-btn" style="margin-top:6px;width:100%">Compress &amp; use</button>
           </div>
 
           <div class="kr-actions">
@@ -246,6 +248,53 @@
     };
     fileInput.onchange = () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); };
 
+    const compressBtn = overlay.querySelector('#kr-compress-btn');
+    const sizeWarnText = overlay.querySelector('#kr-size-warn-text');
+
+    // Target: max 400px on longest side, JPEG quality 0.82 — typically < 80 KB
+    const TARGET_PX   = 400;
+    const JPEG_Q      = 0.82;
+    const WARN_KB     = 300;  // warn above this
+
+    function compressImage(dataURL, callback) {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, TARGET_PX / Math.max(img.width, img.height));
+        const w = Math.round(img.width  * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        callback(canvas.toDataURL('image/jpeg', JPEG_Q), w, h);
+      };
+      img.src = dataURL;
+    }
+
+    function showSizeState(dataURL, filename) {
+      const sizeKB = Math.round(dataURL.length * 0.75 / 1024); // base64 → approx bytes
+      if (sizeKB > WARN_KB) {
+        sizeWarnText.textContent = `This image is ${sizeKB} KB — large images slow the app and may not save.`;
+        sizeWarn.style.display = 'block';
+        compressBtn.style.display = '';
+        compressBtn.textContent = `Compress to ~${TARGET_PX}px JPEG (recommended)`;
+      } else {
+        sizeWarn.style.display = 'none';
+      }
+    }
+
+    compressBtn.onclick = () => {
+      if (!pendingDataURL) return;
+      compressBtn.disabled = true;
+      compressBtn.textContent = 'Compressing…';
+      compressImage(pendingDataURL, (compressed, w, h) => {
+        pendingDataURL = compressed;
+        newImg.src = compressed;
+        const kb = Math.round(compressed.length * 0.75 / 1024);
+        sizeWarnText.textContent = `Compressed to ${w}×${h}px, ~${kb} KB.`;
+        compressBtn.style.display = 'none';
+      });
+    };
+
     function handleFile(file) {
       if (!file.type.startsWith('image/')) {
         alert('Please choose an image file.');
@@ -258,9 +307,8 @@
         newImg.style.display = '';
         newLabel.textContent = file.name;
         saveBtn.disabled = false;
-        // Warn if large (base64 is ~4/3 of original)
-        const sizeKB = Math.round(pendingDataURL.length / 1024);
-        sizeWarn.style.display = sizeKB > 500 ? 'block' : 'none';
+        compressBtn.disabled = false;
+        showSizeState(pendingDataURL, file.name);
       };
       reader.readAsDataURL(file);
     }
