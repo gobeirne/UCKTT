@@ -388,7 +388,7 @@
       style: 'width:100%;margin-bottom:4px', onclick: openImageManager }, '🖼 Manage images'));
     card.appendChild(el('button', { cls: 'mt-btn', style: 'width:100%;color:#1a5fa5;border-color:#9ab8f0',
       onclick: () => { if (window.kttPaired) window.kttPaired.openPairModal(); }
-    }, '📱 Pair child\'s device'));
+    }, '📱 Pair responder device'));
     return card;
   }
 
@@ -1401,6 +1401,9 @@ ${lvls.length ? `
 
   function init() {
     rebuildAllLists();
+    // Always start on the manual setup screen
+    renderSetupScreen();
+    showView('manualSetupView');
 
     const manualBtn = document.getElementById('manualTestBtn');
     if (manualBtn) {

@@ -44,18 +44,16 @@
   // ─── Init ─────────────────────────────────────────────────────────────────
 
   function init() {
-    // Inject <rapid-pair> into body if not already present
-    pairEl = document.getElementById('ktt-rapid-pair');
-    if (!pairEl) {
-      pairEl = document.createElement('rapid-pair');
-      pairEl.id = 'ktt-rapid-pair';
-      pairEl.setAttribute('controller-label', 'Clinician');
-      pairEl.setAttribute('responder-label',  'Client device');
-      pairEl.setAttribute('auto-close', 'true');
-      document.body.appendChild(pairEl);
-    }
+    // Create the element and wire all listeners NOW so messages aren't missed,
+    // but do NOT append it to the DOM yet — that would trigger connectedCallback
+    // and auto-open the pairing modal immediately.
+    pairEl = document.createElement('rapid-pair');
+    pairEl.id = 'ktt-rapid-pair';
+    pairEl.setAttribute('controller-label', 'Clinician');
+    pairEl.setAttribute('responder-label',  'Responder device');
+    pairEl.setAttribute('auto-close', 'true');
 
-    // Wire events
+    // Wire events before appending
     pairEl.addEventListener('secure', onSecure);
     pairEl.addEventListener('disconnected', onDisconnected);
     pairEl.addEventListener('reconnected', onReconnected);
@@ -64,24 +62,30 @@
     pairEl.on('ktt-response', onKttResponse);
 
     // Responder receives
-    pairEl.on('ktt-sync',         onKttSync);
-    pairEl.on('ktt-image-chunk',  onKttImageChunk);
-    pairEl.on('ktt-play',         onKttPlay);
-    pairEl.on('ktt-confirm',      onKttConfirm);
-    pairEl.on('ktt-list-update',  onKttSync);  // alias — list changed mid-session
+    pairEl.on('ktt-sync',        onKttSync);
+    pairEl.on('ktt-image-chunk', onKttImageChunk);
+    pairEl.on('ktt-play',        onKttPlay);
+    pairEl.on('ktt-confirm',     onKttConfirm);
+    pairEl.on('ktt-list-update', onKttSync);
 
-    // Check ?role=responder in URL for future use
+    // ?role=responder support (future)
     if (new URLSearchParams(location.search).get('role') === 'responder') {
-      // Pre-click the responder button once the modal renders
+      openPairModal();
       setTimeout(() => {
-        const btns = document.querySelectorAll('.rp-modal button');
-        btns.forEach(b => { if (b.textContent.trim() === 'Client device') b.click(); });
-      }, 400);
+        document.querySelectorAll('.rp-modal button').forEach(b => {
+          if (b.textContent.trim() === 'Responder device') b.click();
+        });
+      }, 500);
     }
   }
 
   function openPairModal() {
-    if (pairEl) pairEl.open();
+    // First call: append to DOM (triggers connectedCallback → showModal)
+    if (!pairEl.parentNode) {
+      document.body.appendChild(pairEl);
+    } else {
+      pairEl.open();
+    }
   }
 
   function setAudioSource(src) {
@@ -316,6 +320,9 @@
     grid.id = 'ktt-responder-grid';
     grid.className = 'resp-grid';
 
+    // Build absolute base URL so images load correctly regardless of navigation state
+    const base = location.href.replace(/\/[^/]*$/, '/');
+
     respKupu.forEach(kupu => {
       const cell = document.createElement('div');
       cell.className = 'resp-cell';
@@ -323,21 +330,32 @@
 
       const img = document.createElement('img');
       img.alt = kupu;
-      // Use image store if available, otherwise extension fallback
-      if (window.loadKupuImage) window.loadKupuImage(img, kupu);
-      else img.src = `Images/${encodeURIComponent(kupu)}.png`;
+      img.style.background = '#f5f5f5'; // visible while loading
+
+      // Try extensions in order using absolute URLs
+      const exts = ['png','jpg','jpeg','webp'];
+      let extIdx = 0;
+      function tryNext() {
+        if (extIdx >= exts.length) { img.style.visibility = 'hidden'; return; }
+        img.src = `${base}Images/${encodeURIComponent(kupu)}.${exts[extIdx++]}`;
+      }
+      img.onerror = tryNext;
+      img.onload  = () => { img.style.visibility = ''; };
+      tryNext();
 
       const lbl = document.createElement('div');
       lbl.className = 'resp-lbl';
       lbl.textContent = kupu;
 
       cell.append(img, lbl);
-      cell.addEventListener('click', () => onResponderTap(kupu));
-      cell.addEventListener('touchend', e => { e.preventDefault(); onResponderTap(kupu); });
+      cell.addEventListener('click',    ()  => onResponderTap(kupu));
+      cell.addEventListener('touchend', (e) => { e.preventDefault(); onResponderTap(kupu); });
       grid.appendChild(cell);
     });
 
     view.appendChild(grid);
+    // Mark grid interactive immediately — first play will arm it properly
+    respArmed = false;
   }
 
   function onResponderTap(kupu) {
