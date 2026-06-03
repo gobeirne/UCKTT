@@ -128,8 +128,9 @@
 
   const LS_KEY_RECONNECT = 'ktt_reconnect_v1';
   // How long to wait for the beacon response before falling back to full modal
-  const BEACON_TIMEOUT_MS = 4000;
-  const FB_BEACON_COLL    = 'ktt_beacons';  // separate Firestore collection
+  const BEACON_TIMEOUT_MS = 5000;
+  const FB_BEACON_COLL    = 'pairs';   // reuse existing pairs collection with KTT_ prefix
+  const FB_KEY_PREFIX     = 'KTT_';   // distinguishes our docs from live pairing codes
 
   function loadReconnectState() {
     try { return JSON.parse(localStorage.getItem(LS_KEY_RECONNECT) || 'null'); } catch { return null; }
@@ -162,15 +163,16 @@
       kttLog('🔥', 'Firebase already initialized');
       return pairEl._fb;
     }
-    kttLog('🔥', 'Waiting for Firebase to init…');
-    for (let i = 0; i < 20; i++) {
+    if (!pairEl.parentNode) { kttLog('🔥', 'Appending pairEl for Firebase init'); document.body.appendChild(pairEl); }
+    kttLog('🔥', 'Waiting for Firebase + auth to init (up to 4s)…');
+    for (let i = 0; i < 40; i++) {
       await new Promise(r => setTimeout(r, 100));
       if (pairEl._fb?.initialized) {
         kttLog('🔥', `Firebase ready after ${(i+1)*100}ms`);
         return pairEl._fb;
       }
     }
-    kttWarn('🔥', 'Firebase init timed out after 2s');
+    kttWarn('🔥', 'Firebase init timed out after 4s');
     return null;
   }
 
@@ -200,13 +202,13 @@
     }
 
     const secret   = state.secret;
-    const beaconId = secret + '_ctrl';
-    const replyId  = secret + '_resp';
-    kttLog('⚡', `Writing controller beacon: ktt_beacons/${beaconId}`);
+    const beaconId = FB_KEY_PREFIX + secret + '_ctrl';
+    const replyId  = FB_KEY_PREFIX + secret + '_resp';
+    kttLog('⚡', `Writing controller beacon: ${FB_BEACON_COLL}/${beaconId}`);
 
     try {
       const beaconRef = fb.doc(fb.db, FB_BEACON_COLL, beaconId);
-      await fb.setDoc(beaconRef, { ts: fb.ts(), status: 'calling' });
+      await fb.setDoc(beaconRef, { ts: fb.ts(), status: 'calling', app: 'ktt' });
       kttLog('⚡', 'Beacon written — waiting up to', BEACON_TIMEOUT_MS, 'ms for responder reply');
       showFastReconnectUI('Waiting for responder device…');
 
@@ -259,8 +261,8 @@
     }
 
     const secret   = state.secret;
-    const beaconId = secret + '_ctrl';
-    const replyId  = secret + '_resp';
+    const beaconId = FB_KEY_PREFIX + secret + '_ctrl';
+    const replyId  = FB_KEY_PREFIX + secret + '_resp';
 
     if (!pairEl.parentNode) {
       kttLog('📡', 'Appending pairEl to DOM for Firebase access');
@@ -274,7 +276,7 @@
     }
 
     try {
-      kttLog('📡', `Checking for controller beacon: ktt_beacons/${beaconId}`);
+      kttLog('📡', `Checking for controller beacon: ${FB_BEACON_COLL}/${beaconId}`);
       const snap = await fb.getDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId));
       if (!snap.exists()) {
         kttLog('📡', 'No beacon found — controller not calling');
@@ -288,8 +290,8 @@
         return;
       }
 
-      kttLog('📡', `Writing responder reply: ktt_beacons/${replyId}`);
-      await fb.setDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId), { ts: fb.ts(), status: 'ready' });
+      kttLog('📡', `Writing responder reply: ${FB_BEACON_COLL}/${replyId}`);
+      await fb.setDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId), { ts: fb.ts(), status: 'ready', app: 'ktt' });
       fb.deleteDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId)).catch(() => {});
 
       kttLog('📡', 'Reply sent — auto-opening pairing modal in responder mode');

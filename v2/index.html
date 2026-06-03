@@ -517,7 +517,177 @@
 /a/ /ā/	haka	mata	waka	 /ai/	pai	kai	tai	 /i/ /ī/	ihu	inu	ipu	 /o/  /ō/	kōrero	tōtiti	kōtiro	 /au/	kau	rau	tau
   </script>
 
-  <!-- RapidPair dependencies -->
+  <!-- Debug panel — on-screen console for mobile -->
+  <style>
+    #ktt-debug-panel {
+      display: none; position: fixed; inset: 0; z-index: 99000;
+      flex-direction: column; background: rgba(0,0,0,.92);
+      font-family: 'Menlo','Monaco','Courier New',monospace;
+    }
+    #ktt-debug-panel.open { display: flex; }
+    .ktt-debug-toolbar {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      background: #1a1a1a; border-bottom: 1px solid #333; flex-shrink: 0;
+    }
+    .ktt-debug-toolbar span {
+      font-size: 13px; font-weight: 700; color: #7ec8e3; flex: 1;
+      font-family: system-ui, sans-serif;
+    }
+    .ktt-debug-toolbar button {
+      font-size: 11px; padding: 4px 10px; border: 1px solid #444;
+      border-radius: 5px; background: #2a2a2a; color: #ccc; cursor: pointer;
+      font-family: system-ui, sans-serif;
+    }
+    .ktt-debug-toolbar button:hover { background: #3a3a3a; }
+    #ktt-debug-log {
+      flex: 1; overflow-y: auto; padding: 8px 10px;
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .ktt-log-entry {
+      font-size: 11px; line-height: 1.4; padding: 3px 6px;
+      border-radius: 3px; word-break: break-word;
+      border-left: 3px solid transparent;
+    }
+    .ktt-log-entry.log  { color: #d4d4d4; border-left-color: #555; }
+    .ktt-log-entry.warn { color: #ffd080; border-left-color: #f0a500; background: rgba(240,165,0,.08); }
+    .ktt-log-entry.err  { color: #ff8080; border-left-color: #d94040; background: rgba(217,64,64,.08); }
+    .ktt-log-ts { color: #666; font-size: 10px; margin-right: 5px; }
+    .ktt-log-ktt { color: #7ec8e3; }
+    #ktt-debug-filter {
+      font-size: 12px; padding: 4px 8px; border: 1px solid #444;
+      border-radius: 5px; background: #2a2a2a; color: #ccc; width: 140px;
+      font-family: system-ui, sans-serif;
+    }
+  </style>
+
+  <div id="ktt-debug-panel">
+    <div class="ktt-debug-toolbar">
+      <span>🐛 KTT Debug Log</span>
+      <input id="ktt-debug-filter" type="search" placeholder="Filter…">
+      <button id="ktt-debug-copy">Copy all</button>
+      <button id="ktt-debug-clear">Clear</button>
+      <button id="ktt-debug-close">✕ Close</button>
+    </div>
+    <div id="ktt-debug-log"></div>
+  </div>
+
+  <script>
+  (() => {
+    const MAX_ENTRIES = 500;
+    const entries = [];
+    let filterText = '';
+    let isOpen = false;
+
+    const panel   = document.getElementById('ktt-debug-panel');
+    const logEl   = document.getElementById('ktt-debug-log');
+    const filterEl = document.getElementById('ktt-debug-filter');
+
+    function ts() {
+      const d = new Date();
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}.${String(d.getMilliseconds()).padStart(3,'0')}`;
+    }
+
+    function addEntry(level, args) {
+      const text = args.map(a => {
+        if (typeof a === 'object' && a !== null) {
+          try { return JSON.stringify(a, null, 0); } catch { return String(a); }
+        }
+        return String(a);
+      }).join(' ');
+
+      const entry = { ts: ts(), level, text };
+      entries.push(entry);
+      if (entries.length > MAX_ENTRIES) entries.shift();
+      if (isOpen) appendEntryEl(entry);
+    }
+
+    function appendEntryEl(entry) {
+      if (filterText && !entry.text.toLowerCase().includes(filterText)) return;
+
+      const div = document.createElement('div');
+      div.className = `ktt-log-entry ${entry.level}`;
+
+      const tsSpan = document.createElement('span');
+      tsSpan.className = 'ktt-log-ts';
+      tsSpan.textContent = entry.ts;
+
+      const textNode = document.createTextNode(entry.text);
+
+      div.appendChild(tsSpan);
+
+      // Highlight [KTT] prefix in blue
+      if (entry.text.startsWith('[KTT]')) {
+        const kttSpan = document.createElement('span');
+        kttSpan.className = 'ktt-log-ktt';
+        kttSpan.textContent = '[KTT]';
+        div.appendChild(kttSpan);
+        div.appendChild(document.createTextNode(entry.text.slice(5)));
+      } else {
+        div.appendChild(textNode);
+      }
+
+      logEl.appendChild(div);
+      // Keep scroll at bottom
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function rerender() {
+      logEl.innerHTML = '';
+      entries.forEach(appendEntryEl);
+    }
+
+    // Intercept console methods
+    const _log  = console.log.bind(console);
+    const _warn = console.warn.bind(console);
+    const _err  = console.error.bind(console);
+
+    console.log = (...args) => { _log(...args);  addEntry('log',  args); };
+    console.warn= (...args) => { _warn(...args); addEntry('warn', args); };
+    console.error=(...args) => { _err(...args);  addEntry('err',  args); };
+
+    // Catch unhandled errors
+    window.addEventListener('error', e => {
+      addEntry('err', [`Uncaught: ${e.message}`, `@ ${e.filename}:${e.lineno}`]);
+    });
+    window.addEventListener('unhandledrejection', e => {
+      addEntry('err', [`Unhandled promise rejection: ${e.reason}`]);
+    });
+
+    function toggle() {
+      isOpen = !isOpen;
+      panel.classList.toggle('open', isOpen);
+      if (isOpen) { rerender(); logEl.scrollTop = logEl.scrollHeight; }
+    }
+
+    document.getElementById('ktt-debug-close').onclick = () => toggle();
+    document.getElementById('ktt-debug-clear').onclick = () => {
+      entries.length = 0; logEl.innerHTML = '';
+    };
+    document.getElementById('ktt-debug-copy').onclick = () => {
+      const text = entries.map(e => `${e.ts} [${e.level.toUpperCase()}] ${e.text}`).join('\n');
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard'));
+      } else {
+        // Fallback for older iOS
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); ta.remove();
+        alert('Copied to clipboard');
+      }
+    };
+    filterEl.oninput = e => {
+      filterText = e.target.value.toLowerCase().trim();
+      rerender();
+    };
+
+    // Expose globally
+    window.kttDebugPanel = { toggle, entries };
+
+    // Log startup
+    console.log('[KTT] 🐛 Debug panel ready. Call kttDebugPanel.toggle() or tap "Debug log".');
+  })();
+  </script>
   <script src="pako.min.js"></script>
   <script src="qrcode.js"></script>
   <script src="html5-qrcode.min.js"></script>

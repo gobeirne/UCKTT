@@ -249,10 +249,15 @@
 
     root.innerHTML = '';
 
-    // Header right: calibration link
-    const calibLink = el('a', { cls: 'mt-btn', href: 'https://gobeirne.github.io/UCLing/', target: '_blank' },
-      '🔊 Calibration');
-    root.appendChild(makeHeader('Setup', calibLink));
+    // Header right: calibration link + debug log button
+    const headerRight = el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap' });
+    headerRight.appendChild(el('a', { cls: 'mt-btn', href: 'https://gobeirne.github.io/UCLing/', target: '_blank' },
+      '🔊 Calibration'));
+    headerRight.appendChild(el('button', { cls: 'mt-btn',
+      style: 'font-size:11px',
+      onclick: () => window.kttDebugPanel?.toggle()
+    }, '🐛 Debug log'));
+    root.appendChild(makeHeader('Setup', headerRight));
 
     // Body
     const body = el('div', { cls: 'mt-setup-body' });
