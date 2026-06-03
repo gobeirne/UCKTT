@@ -397,6 +397,18 @@
     card.appendChild(el('button', { cls: 'mt-btn', style: 'width:100%;color:#1a5fa5;border-color:#9ab8f0',
       onclick: () => { if (window.kttPaired) window.kttPaired.openPairModal(); }
     }, '📱 Pair responder device'));
+    const pairState = (() => { try { return JSON.parse(localStorage.getItem('ktt_reconnect_v1') || 'null'); } catch { return null; } })();
+    if (pairState?.secret) {
+      const forgetRow = el('div', { style: 'display:flex;align-items:center;gap:6px;margin-top:2px' });
+      forgetRow.appendChild(el('span', { style: 'font-size:10px;color:#888;flex:1' },
+        pairState.role === 'controller' ? '💾 Saved pairing — tap above to reconnect' : '💾 Saved as responder'));
+      forgetRow.appendChild(el('button', {
+        cls: 'mt-btn', style: 'font-size:10px;padding:2px 7px;color:#c0392b;border-color:#e0b0b0',
+        title: 'Forget saved pairing',
+        onclick: () => { localStorage.removeItem('ktt_reconnect_v1'); renderSetupScreen(); }
+      }, 'Forget'));
+      card.appendChild(forgetRow);
+    }
     return card;
   }
 

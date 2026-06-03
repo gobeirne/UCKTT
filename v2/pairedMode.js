@@ -42,6 +42,188 @@
     statusEl:       null,
   };
 
+  // ─── Fast reconnect ───────────────────────────────────────────────────────
+  // On first pairing, controller generates a shared secret and sends it to the
+  // responder via ktt-hello. Both store it in localStorage.
+  // On subsequent pair attempts, controller writes a "beacon" doc to Firebase
+  // under the secret. Responder (open in background) sees it and auto-enters
+  // the pairing code in rapidpair's modal — no manual entry needed.
+
+  const LS_KEY_RECONNECT = 'ktt_reconnect_v1';
+  // How long to wait for the beacon response before falling back to full modal
+  const BEACON_TIMEOUT_MS = 4000;
+  const FB_BEACON_COLL    = 'ktt_beacons';  // separate Firestore collection
+
+  function loadReconnectState() {
+    try { return JSON.parse(localStorage.getItem(LS_KEY_RECONNECT) || 'null'); } catch { return null; }
+  }
+  function saveReconnectState(obj) {
+    try { localStorage.setItem(LS_KEY_RECONNECT, JSON.stringify(obj)); } catch (_) {}
+  }
+  function clearReconnectState() {
+    localStorage.removeItem(LS_KEY_RECONNECT);
+  }
+
+  // Called when controller gets secure — generate secret, send to responder
+  function initReconnectSecret() {
+    const existing = loadReconnectState();
+    // Reuse existing secret if we have one; create new one if not
+    const secret = existing?.secret || Array.from(crypto.getRandomValues(new Uint8Array(5)))
+      .map(b => b.toString(36)).join('').toUpperCase();
+    saveReconnectState({ secret, role: 'controller', savedAt: Date.now() });
+    // Tell responder the secret so they can save it too
+    pairEl.send('ktt-hello', { secret, v: 1 });
+  }
+
+  // Responder receives the hello and saves the secret
+  function onKttHello(p) {
+    if (pairRole !== 'responder') return;
+    saveReconnectState({ secret: p.secret, role: 'responder', savedAt: Date.now() });
+  }
+
+  // Get the Firebase db reference — reuse rapidpair's own instance
+  async function getFB() {
+    // RapidPair lazily initialises Firebase when the element connects.
+    // We trigger that by appending the element (which we do in openPairModal
+    // anyway), then wait briefly for it to be ready.
+    // Fall back to our own lightweight init if needed.
+    if (pairEl._fb?.initialized) return pairEl._fb;
+    // Wait up to 2s for pairEl Firebase to init
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      if (pairEl._fb?.initialized) return pairEl._fb;
+    }
+    return null; // timed out — fall through to normal modal
+  }
+
+  // Controller side: write a beacon, wait for responder to acknowledge
+  async function attemptFastReconnect() {
+    const state = loadReconnectState();
+    if (!state?.secret || state.role !== 'controller') return false;
+
+    showFastReconnectUI('Checking for saved device…');
+
+    // Ensure pairEl is in DOM (needed for Firebase access)
+    if (!pairEl.parentNode) document.body.appendChild(pairEl);
+
+    const fb = await getFB();
+    if (!fb) { hideFastReconnectUI(); return false; }
+
+    const secret  = state.secret;
+    const beaconId = secret + '_ctrl';
+    const replyId  = secret + '_resp';
+
+    try {
+      // Write controller beacon
+      const beaconRef = fb.doc(fb.db, FB_BEACON_COLL, beaconId);
+      await fb.setDoc(beaconRef, { ts: fb.ts(), status: 'calling' });
+
+      showFastReconnectUI('Waiting for responder device…');
+
+      // Poll for responder's acknowledgement
+      const found = await new Promise(resolve => {
+        const deadline = setTimeout(() => resolve(false), BEACON_TIMEOUT_MS);
+        const unsub = fb.onSnapshot(fb.doc(fb.db, FB_BEACON_COLL, replyId), snap => {
+          if (snap.exists() && snap.data()?.status === 'ready') {
+            clearTimeout(deadline);
+            unsub();
+            resolve(true);
+          }
+        });
+      });
+
+      // Clean up beacon docs
+      fb.deleteDoc(beaconRef).catch(() => {});
+      fb.deleteDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId)).catch(() => {});
+
+      hideFastReconnectUI();
+      if (found) {
+        showFastReconnectUI('Responder found — opening pairing…');
+        // The responder device is online and ready.
+        // Open the pairing modal — the responder will auto-enter the code.
+        // Brief delay so the user sees the message.
+        await new Promise(r => setTimeout(r, 600));
+        hideFastReconnectUI();
+        return true; // caller should proceed with pairEl.open()
+      }
+      return false;
+
+    } catch (err) {
+      console.warn('[KTT reconnect] beacon error:', err);
+      hideFastReconnectUI();
+      return false;
+    }
+  }
+
+  // Responder side: poll for controller beacon on app load, auto-enter code
+  async function responderCheckBeacon() {
+    const state = loadReconnectState();
+    if (!state?.secret || state.role !== 'responder') return;
+
+    // Don't run if already connected
+    if (pairSecure) return;
+
+    const secret  = state.secret;
+    const beaconId = secret + '_ctrl';
+    const replyId  = secret + '_resp';
+
+    // Ensure pairEl is in DOM
+    if (!pairEl.parentNode) document.body.appendChild(pairEl);
+
+    const fb = await getFB();
+    if (!fb) return;
+
+    try {
+      // Check if controller beacon exists
+      const snap = await fb.getDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId));
+      if (!snap.exists()) return;
+
+      const ageSec = (Date.now() - (snap.data()?.ts?.toMillis?.() || 0)) / 1000;
+      if (ageSec > 30) return; // stale beacon
+
+      // Write reply
+      await fb.setDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId), { ts: fb.ts(), status: 'ready' });
+
+      // Clean up controller beacon
+      fb.deleteDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId)).catch(() => {});
+
+      // Open modal in responder mode — auto-click the responder role button
+      pairEl.open();
+      await new Promise(r => setTimeout(r, 300));
+      document.querySelectorAll('.rp-modal button').forEach(b => {
+        if (b.textContent.trim() === 'Responder device') b.click();
+      });
+
+    } catch (err) {
+      console.warn('[KTT reconnect] responder beacon check error:', err);
+    }
+  }
+
+  // ─── Fast reconnect UI ────────────────────────────────────────────────────
+
+  function showFastReconnectUI(msg) {
+    let el = document.getElementById('ktt-reconnect-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'ktt-reconnect-toast';
+      el.style.cssText = `
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+        background: #1a5fa5; color: #fff; font-family: system-ui, sans-serif;
+        font-size: 13px; font-weight: 600; padding: 10px 20px; border-radius: 999px;
+        box-shadow: 0 4px 16px rgba(0,0,0,.2); z-index: 99999;
+        display: flex; align-items: center; gap: 8px; white-space: nowrap;
+      `;
+      document.body.appendChild(el);
+    }
+    el.innerHTML = `<span style="font-size:16px">⟳</span> ${msg}`;
+    el.style.display = 'flex';
+  }
+
+  function hideFastReconnectUI() {
+    const el = document.getElementById('ktt-reconnect-toast');
+    if (el) el.style.display = 'none';
+  }
+
   // ─── Init ─────────────────────────────────────────────────────────────────
 
   function init() {
@@ -69,6 +251,7 @@
     pairEl.on('ktt-confirm',     onKttConfirm);
     pairEl.on('ktt-list-reset',  onKttListReset);
     pairEl.on('ktt-list-update', onKttSync);
+    pairEl.on('ktt-hello',       onKttHello);
 
     // ?role=responder support (future)
     if (new URLSearchParams(location.search).get('role') === 'responder') {
@@ -79,14 +262,29 @@
         });
       }, 500);
     }
+
+    // If this device has a saved responder pairing, silently check for a
+    // waiting controller beacon in the background (runs ~2s after load)
+    const state = loadReconnectState();
+    if (state?.secret && state.role === 'responder') {
+      setTimeout(responderCheckBeacon, 2000);
+    }
   }
 
   function openPairModal() {
-    // First call: append to DOM (triggers connectedCallback → showModal)
-    if (!pairEl.parentNode) {
-      document.body.appendChild(pairEl);
+    // If we have a saved pairing, try fast reconnect first
+    const state = loadReconnectState();
+    if (state?.secret && state.role === 'controller' && !pairSecure) {
+      attemptFastReconnect().then(found => {
+        // Whether found or not, open the modal — if found the responder will
+        // auto-enter their side, if not the clinician does it manually as normal
+        if (!pairEl.parentNode) document.body.appendChild(pairEl);
+        else pairEl.open();
+      });
     } else {
-      pairEl.open();
+      // First time or responder role — just open normally
+      if (!pairEl.parentNode) document.body.appendChild(pairEl);
+      else pairEl.open();
     }
   }
 
@@ -102,6 +300,8 @@
     updateStatusBadge('connected');
 
     if (pairRole === 'controller') {
+      // Generate/reuse shared reconnect secret and send to responder
+      initReconnectSecret();
       // Tell responder to show waiting state — grid populates on "Start test"
       const list = window.kttManual?.getActiveListForPair?.();
       sendListReset(list?.name || '');
