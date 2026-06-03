@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>UC4AFC Manual JS Bundler</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 2em;
+      max-width: 900px;
+      margin: auto;
+    }
+    textarea {
+      width: 100%;
+      height: 300px;
+      font-family: monospace;
+      margin-top: 1em;
+    }
+    label {
+      font-weight: bold;
+      margin-top: 1em;
+      display: block;
+    }
+    button {
+      margin-right: 1em;
+      margin-top: 1em;
+      padding: 0.5em 1em;
+    }
+    ul#orderList {
+      list-style: none;
+      padding: 0;
+      margin-top: 1em;
+      border: 1px solid #ccc;
+      min-height: 120px;
+    }
+    ul#orderList li {
+      padding: 0.5em;
+      margin: 0;
+      background: #f9f9f9;
+      border-bottom: 1px solid #ddd;
+      cursor: move;
+    }
+    ul#orderList li.dragging {
+      opacity: 0.5;
+      background: #d0eaff;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🧩 UC4AFC Manual Module Bundler</h1>
+
+<p>Select your JavaScript module files:</p>
+<input type="file" id="fileInput" multiple accept=".js" />
+
+<label>Order of Files (drag to reorder):</label>
+<ul id="orderList"></ul>
+
+<button id="bundleBtn">🛠 Create main.inline.js</button>
+<button id="downloadBtn" disabled>💾 Download</button>
+
+<label>Preview Output:</label>
+<textarea id="bundle" readonly></textarea>
+
+<script>
+let files = [];
+const preferredOrder = [
+  "global.js",
+  "config.js",
+  "ui.js",
+  "setImage.js",
+  "flow.js",
+  "list.js",
+  "preload.js",
+  "results.js",
+  "main.js"
+];
+
+document.body.insertAdjacentHTML("afterbegin", `
+  <p><strong>📚 Default Module Order:</strong><br>
+  ${preferredOrder.map(f => `<code>${f}</code>`).join(", ")}</p>
+`);
+
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+const raw = Array.from(e.target.files).filter(f => !["main.inline.js", "service-worker.js"].includes(f.name));
+  const fileMap = Object.fromEntries(raw.map(f => [f.name, f]));
+
+  // Sort based on preferred order, then extras
+  const sorted = preferredOrder.map(name => fileMap[name]).filter(Boolean);
+  const extras = raw.filter(f => !preferredOrder.includes(f.name));
+  files = [...sorted, ...extras];
+
+  const orderList = document.getElementById("orderList");
+  orderList.innerHTML = "";
+
+  files.forEach((file, idx) => {
+    if (!file) return;
+    const li = document.createElement("li");
+    li.textContent = file.name;
+    li.setAttribute("data-index", idx);
+    li.draggable = true;
+    orderList.appendChild(li);
+  });
+
+  setupDragDrop();
+});
+
+function setupDragDrop() {
+  const list = document.getElementById("orderList");
+  let dragged;
+
+  list.querySelectorAll("li").forEach((item) => {
+    item.addEventListener("dragstart", () => {
+      dragged = item;
+      item.classList.add("dragging");
+    });
+    item.addEventListener("dragend", () => {
+      dragged.classList.remove("dragging");
+    });
+    item.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      const target = e.target;
+      if (target.tagName === "LI" && target !== dragged) {
+        const rect = target.getBoundingClientRect();
+        const next = (e.clientY - rect.top) > (rect.height / 2);
+        list.insertBefore(dragged, next ? target.nextSibling : target);
+      }
+    });
+  });
+}
+
+function stripModules(code, seenGlobals = new Set()) {
+  const lines = code.split("\n");
+  const output = [];
+  let inFunction = false;
+  let braceDepth = 0;
+  let skipMultilineImport = false;
+
+  for (let line of lines) {
+    if (skipMultilineImport) {
+      if (line.includes("}")) skipMultilineImport = false;
+      continue;
+    }
+
+    if (/^\s*import\s+\{/.test(line) && !line.includes("}")) {
+      skipMultilineImport = true;
+      continue;
+    }
+
+    if (/^\s*import[\s\S]*from\s+['"][^'"]+['"]\s*;?\s*$/.test(line)) continue;
+
+    line = line.replace(/^export\s+/, "");
+    if (/^\s*export\s+\{[^}]+\};?/.test(line)) continue;
+
+    if (line.includes("{")) braceDepth += (line.match(/{/g) || []).length;
+    if (line.includes("}")) braceDepth -= (line.match(/}/g) || []).length;
+    inFunction = braceDepth > 0;
+
+    const declMatch = line.match(/^\s*(let|const|var)\s+([\w$]+)/);
+    if (declMatch && !inFunction) {
+      const varName = declMatch[2];
+      if (seenGlobals.has(varName)) continue;
+      seenGlobals.add(varName);
+    }
+
+    output.push(line);
+  }
+
+  return output.join("\n");
+}
+
+document.getElementById("bundleBtn").addEventListener("click", async () => {
+  if (!files.length) {
+    alert("Please select files first.");
+    return;
+  }
+
+  const list = document.getElementById("orderList");
+  const order = Array.from(list.children).map(li => li.textContent);
+  const fileMap = Object.fromEntries(await Promise.all(files.map(async f => [f.name, await f.text()])));
+  const seenGlobals = new Set();
+  let result = `"use strict";\n\n// --- Bundled main.inline.js ---\n\n`;
+
+  for (const fileName of order) {
+    const code = fileMap[fileName];
+    const cleaned = stripModules(code, seenGlobals);
+    result += `// --- ${fileName} ---\n${cleaned}\n\n`;
+  }
+
+  document.getElementById("bundle").value = result;
+  document.getElementById("downloadBtn").disabled = false;
+});
+
+document.getElementById("downloadBtn").addEventListener("click", () => {
+  const text = document.getElementById("bundle").value;
+  const blob = new Blob([text], { type: "text/javascript" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "main.inline.js";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+
+
+
+</body>
+</html>
