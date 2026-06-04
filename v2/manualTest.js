@@ -221,25 +221,39 @@
 
   // ─── Audio ────────────────────────────────────────────────────────────────
 
+  function clearClientPII() {
+    // Clear per-client fields — keep clinician and location (device-level settings)
+    sessionMeta.clientName = '';
+    sessionMeta.nhi        = '';
+    sessionMeta.dob        = '';
+    sessionMeta.testDate   = '';
+    saveSettings({
+      clientName: '', nhi: '', dob: '', testDate: '',
+      // preserve clinician fields
+      clinicianName: sessionMeta.clinicianName,
+      clinicianRole: sessionMeta.clinicianRole,
+      location:      sessionMeta.location,
+    });
+  }
+
   function navigateToSetup() {
     stopAudio();
     if (hasUnsavedScores()) {
-      // Show a non-blocking prompt — three choices
       showUnsavedPrompt(
         () => {
-          // Save then go
           saveResults();
+          clearClientPII();
           renderSetupScreen();
           showView('manualSetupView');
         },
         () => {
-          // Discard — session already autosaved, just navigate
+          clearClientPII();
           renderSetupScreen();
           showView('manualSetupView');
         }
-        // Cancel: do nothing, stay on test screen
       );
     } else {
+      clearClientPII();
       renderSetupScreen();
       showView('manualSetupView');
     }
@@ -917,7 +931,7 @@
     // Header — kupu column always, then one column per level used
     const thead = el('thead');
     const hrow  = el('tr');
-    hrow.appendChild(el('th', { cls: 'mt-th-kupu' }, showLabels ? 'Kupu' : ''));
+    hrow.appendChild(el('th', { cls: 'mt-th-kupu' }, 'Kupu'));
     if (levelsUsed.length === 0) {
       hrow.appendChild(el('th', { cls: 'mt-th-level', style: 'color:#bbb;font-style:italic;font-weight:normal' },
         'press Play to score'));

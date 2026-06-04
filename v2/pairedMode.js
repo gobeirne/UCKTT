@@ -634,7 +634,7 @@
     kttLog('▶', `Received ktt-play: ${p.kupu} @ ${p.level} dBA | playAudio: ${p.playAudio}`);
     respArmed = false; respTapped = null; respConfirmed = false;
     document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => {
-      c.classList.remove('resp-tapped', 'resp-correct', 'resp-incorrect');
+      c.classList.remove('resp-tapped', 'resp-done');
     });
     if (p.playAudio) {
       stopRespAudio();
@@ -661,19 +661,21 @@
 
   function onKttConfirm(p) {
     if (pairRole !== 'responder') return;
-    kttLog('📝', `Received confirm: ${p.correct ? 'CORRECT' : 'INCORRECT'} | kupu: ${p.kupu}`);
+    kttLog('📝', `Received confirm | kupu: ${p.kupu}`);
     respConfirmed = true;
     const cell = document.querySelector(`#ktt-responder-grid [data-kupu="${CSS.escape(p.kupu || respTapped)}"]`);
     if (cell) {
+      // Neutral acknowledgement only — no correct/incorrect feedback to the child
       cell.classList.remove('resp-tapped');
-      cell.classList.add(p.correct ? 'resp-correct' : 'resp-incorrect');
+      cell.classList.add('resp-done');
       setTimeout(() => {
-        cell.classList.remove('resp-correct', 'resp-incorrect');
+        cell.classList.remove('resp-done');
         respConfirmed = false; respTapped = null; respArmed = true;
-        kttLog('📝', 'Confirm flash done — grid re-armed');
-      }, 1200);
+        kttLog('📝', 'Confirm done — grid re-armed');
+      }, 600);
     } else {
       kttWarn('📝', 'No cell found for confirm kupu:', p.kupu || respTapped);
+      respConfirmed = false; respTapped = null; respArmed = true;
     }
   }
 
@@ -920,8 +922,7 @@
 
       /* States */
       .resp-cell.resp-tapped   { border-color: #f0a500; background: #fff8e6; transform: scale(.98); }
-      .resp-cell.resp-correct  { border-color: #2e7d32; background: #e8f5e9; }
-      .resp-cell.resp-incorrect{ border-color: #c62828; background: #ffebee; }
+      .resp-cell.resp-done     { opacity: 0.4; transition: opacity 0.3s; }
 
       /* Controller: amber highlight for peer response */
       .mt-row-peer-response td { background: #fff3cd !important; }
