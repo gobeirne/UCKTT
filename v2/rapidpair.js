@@ -1168,21 +1168,28 @@
      *  RESPONDER FLOW
      * ================================================================ */
     async _responderConnect() {
+      const btn = this._$('#btnResponderConnect');
+      const _disableBtn = () => { if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; } };
+      const _enableBtn  = () => { if (btn) { btn.disabled = false; btn.textContent = 'Connect'; } };
+
+      _disableBtn();
+
       try {
         await this._ensureFirebase();
       } catch (e) {
         this._showStatus('#responderStatus', '⚠️ No internet. Use "Scan QR Code" option below.', 'error');
+        _enableBtn();
         return;
       }
 
       const code = this._$('#responderCodeInput').value.trim();
-      if (!code) { this._showStatus('#responderStatus', '⚠️ Please enter a code', 'error'); return; }
+      if (!code) { this._showStatus('#responderStatus', '⚠️ Please enter a code', 'error'); _enableBtn(); return; }
 
       this._showStatus('#responderStatus', '🔍 Looking up code...', 'loading');
       const ref = this._fb.doc(this._fb.db, 'pairs', code);
       const snap = await this._fb.getDoc(ref);
 
-      if (!snap.exists()) { this._showStatus('#responderStatus', '❌ Code not found', 'error'); return; }
+      if (!snap.exists()) { this._showStatus('#responderStatus', '❌ Code not found', 'error'); _enableBtn(); return; }
 
       const data = snap.data() || {};
 
@@ -1191,43 +1198,52 @@
         const ageSec = (Date.now() - data.ts.toMillis()) / 1000;
         if (ageSec > this._codeTTL) {
           this._showStatus('#responderStatus', '❌ Code expired. Ask for a new code.', 'error');
+          _enableBtn();
           return;
         }
       }
 
-      if (!data.offer) { this._showStatus('#responderStatus', '⏳ No offer yet. Wait a moment.', 'error'); return; }
+      if (!data.offer) { this._showStatus('#responderStatus', '⏳ No offer yet. Wait a moment.', 'error'); _enableBtn(); return; }
 
       this._showStatus('#responderStatus', '🔗 Connecting...', 'loading');
-      const obj = this._unpack(data.offer);
 
-      const hasRelay = obj.sdp.c && obj.sdp.c.some(c => { const p = c.split('|'); return p.length >= 6 && p[5] === 'relay'; });
-      const hasSRFLX = obj.sdp.c && obj.sdp.c.some(c => { const p = c.split('|'); return p.length >= 6 && p[5] === 'srflx'; });
-      let pcConfig = 'lan';
-      if (hasRelay) pcConfig = 'turn';
-      else if (hasSRFLX) pcConfig = 'stun';
+      try {
+        const obj = this._unpack(data.offer);
 
-      try { this._pc?.close(); } catch (_) {}
-      this._pc = await this._newPC(pcConfig);
+        const hasRelay = obj.sdp.c && obj.sdp.c.some(c => { const p = c.split('|'); return p.length >= 6 && p[5] === 'relay'; });
+        const hasSRFLX = obj.sdp.c && obj.sdp.c.some(c => { const p = c.split('|'); return p.length >= 6 && p[5] === 'srflx'; });
+        let pcConfig = 'lan';
+        if (hasRelay) pcConfig = 'turn';
+        else if (hasSRFLX) pcConfig = 'stun';
 
-      const fullSDP = this._reconstructSDP(obj.sdp);
-      await this._pc.setRemoteDescription({ type: obj.sdp.t === 'o' ? 'offer' : 'answer', sdp: fullSDP });
-      await this._pc.setLocalDescription(await this._pc.createAnswer());
+        try { this._pc?.close(); } catch (_) {}
+        this._pc = await this._newPC(pcConfig);
 
-      // Wait for first relay candidate or 1.5s timeout
-      await new Promise(res => {
-        let done = false;
-        const resolve = () => { if (!done) { done = true; res(); } };
-        const check = (e) => {
-          if (e.candidate && e.candidate.type === 'relay') { this._pc.removeEventListener('icecandidate', check); resolve(); }
-        };
-        this._pc.addEventListener('icecandidate', check);
-        setTimeout(() => { this._pc.removeEventListener('icecandidate', check); resolve(); }, 1500);
-      });
+        const fullSDP = this._reconstructSDP(obj.sdp);
+        await this._pc.setRemoteDescription({ type: obj.sdp.t === 'o' ? 'offer' : 'answer', sdp: fullSDP });
+        await this._pc.setLocalDescription(await this._pc.createAnswer());
 
-      const minSDP = this._extractMinimalSDP(this._pc.localDescription.sdp, this._pc.localDescription.type, pcConfig !== 'lan');
-      const joinPacked = this._pack({ role: 'join', sdp: minSDP });
-      await this._fb.setDoc(ref, { answer: joinPacked, ts: this._fb.ts() }, { merge: true });
-      this._showStatus('#responderStatus', '⏳ Waiting for connection...', 'loading');
+        // Wait for first relay candidate or 1.5s timeout
+        await new Promise(res => {
+          let done = false;
+          const resolve = () => { if (!done) { done = true; res(); } };
+          const check = (e) => {
+            if (e.candidate && e.candidate.type === 'relay') { this._pc.removeEventListener('icecandidate', check); resolve(); }
+          };
+          this._pc.addEventListener('icecandidate', check);
+          setTimeout(() => { this._pc.removeEventListener('icecandidate', check); resolve(); }, 1500);
+        });
+
+        const minSDP = this._extractMinimalSDP(this._pc.localDescription.sdp, this._pc.localDescription.type, pcConfig !== 'lan');
+        const joinPacked = this._pack({ role: 'join', sdp: minSDP });
+        await this._fb.setDoc(ref, { answer: joinPacked, ts: this._fb.ts() }, { merge: true });
+        this._showStatus('#responderStatus', '⏳ Waiting for connection...', 'loading');
+        // Button stays disabled — connection is in progress; modal will close on success
+      } catch (e) {
+        this._log('Responder connect error:', e.message);
+        this._showStatus('#responderStatus', '❌ Connection failed. Please try again.', 'error');
+        _enableBtn();
+      }
     }
 
     /* ================================================================
