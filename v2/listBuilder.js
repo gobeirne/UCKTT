@@ -75,6 +75,27 @@
     wheke:   ['keke'],
   };
 
+  // ─── Visual conflict groups ─────────────────────────────────────────────────
+  // Some kupu, with their DEFAULT images, share a confounding visual feature
+  // (e.g. both depict water, or both depict food), so a child could pick the
+  // right picture for the wrong reason. These are soft cautions, not blocks —
+  // a clinician using their own uploaded images may have no conflict at all.
+  // Add new members to a group's `words`; the warning fires for any 2+ in a group.
+  const CONFLICT_GROUPS = [
+    { id: 'water', feature: 'contain water', words: ['inu', 'wai'] },
+    { id: 'food',  feature: 'are food',      words: ['kai', 'tīhi'] },
+  ];
+
+  // Returns array of { feature, words:[...] } for every group with 2+ selected.
+  function detectConflicts() {
+    const out = [];
+    CONFLICT_GROUPS.forEach(g => {
+      const hits = g.words.filter(w => selected.has(w));
+      if (hits.length >= 2) out.push({ feature: g.feature, words: hits });
+    });
+    return out;
+  }
+
   // ─── State ─────────────────────────────────────────────────────────────────
   let selected = new Set();
   let listName = '';
@@ -171,7 +192,23 @@
       return;
     }
 
+    // Soft caution for kupu whose default images share a confounding feature.
     let html = '';
+    const conflicts = detectConflicts();
+    if (conflicts.length) {
+      const lines = conflicts.map(c => {
+        const list = c.words.join(' + ');
+        return `<div class="lb-conflict-line"><strong>${list}</strong> ${c.feature}</div>`;
+      }).join('');
+      html += `
+        <div class="lb-conflict">
+          <div class="lb-conflict-head">⚠ Possible image overlap</div>
+          ${lines}
+          <div class="lb-conflict-note">A child might choose correctly for the wrong reason.
+          Fine to keep if your own images differ — just a heads-up.</div>
+        </div>`;
+    }
+
     selected.forEach(w => {
       const pairs = (PAIRS[w] || []);
       const pairTags = pairs.map(p => {
@@ -540,6 +577,15 @@
 
 .lb-basket-items { flex: 1; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
 .lb-basket-empty { font-size: 12px; color: #aaa; text-align: center; padding: 24px 0; line-height: 1.7; }
+
+.lb-conflict {
+  background: #fff8e1; border: 1px solid #ffe08a; border-radius: 7px;
+  padding: 8px 10px; margin-bottom: 8px;
+}
+.lb-conflict-head { font-size: 12px; font-weight: 700; color: #7a5b00; margin-bottom: 3px; }
+.lb-conflict-line { font-size: 12px; color: #5a4500; line-height: 1.6; }
+.lb-conflict-line strong { color: #111; }
+.lb-conflict-note { font-size: 11px; color: #8a7330; margin-top: 4px; line-height: 1.5; }
 
 .lb-basket-item {
   background: #fff; border: 1px solid #e8e8e8; border-radius: 7px;

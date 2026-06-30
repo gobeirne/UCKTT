@@ -168,6 +168,13 @@
   .mt-info-list   { font-size: 12px; color: #888; }
   .mt-info-mode   { font-size: 11px; color: #aaa; }
   .mt-label-toggle { font-size: 11px; color: #888; cursor: pointer; display: flex; align-items: center; gap: 3px; margin-left: auto; }
+  .mt-label-seg { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+  .mt-label-seg-title { font-size: 11px; color: #888; margin-right: 2px; }
+  .mt-label-seg-btn {
+    font-size: 11px; padding: 3px 9px; background: #fff; color: #666;
+    cursor: pointer; border: 1px solid #ddd; border-radius: 5px; line-height: 1.4;
+  }
+  .mt-label-seg-btn.on { background: #e8f0fc; color: #1a5fa5; font-weight: 700; border-color: #9ab8f0; }
 
   /* Shared button/card tokens */
   .mt-btn {
@@ -374,6 +381,7 @@
     /* Info bar */
     .mt-info-bar { padding: 5px 10px; gap: 6px; }
     .mt-label-toggle { margin-left: 0; }
+    .mt-label-seg { margin-left: 0; flex-wrap: wrap; }
 
     /* Topbar */
     .mt-topbar { padding: 7px 10px; gap: 5px; }
@@ -413,12 +421,63 @@
 
 
 <script>
-  // Register the service worker
+  // Service worker registration + version awareness (#8 cache-buster)
+  window.KTT_APP_VERSION = null;   // filled in once the SW reports it
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./sw.js')
-        .then(reg => console.log('SW registered', reg.scope))
+        .then(reg => {
+          console.log('SW registered', reg.scope);
+          // Ask the active SW for its version (shown in the diagnostic panel).
+          function askVersion(sw) {
+            if (!sw) return;
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => {
+              if (e.data && e.data.version) {
+                window.KTT_APP_VERSION = e.data.version;
+                console.log('KTT app version', e.data.version);
+              }
+            };
+            try { sw.postMessage({ type: 'GET_VERSION' }, [ch.port2]); } catch (_) {}
+          }
+          askVersion(reg.active || navigator.serviceWorker.controller);
+
+          // Detect a new version installing while the page is open.
+          reg.addEventListener('updatefound', () => {
+            const nw = reg.installing;
+            if (!nw) return;
+            nw.addEventListener('statechange', () => {
+              if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                // A fresh build is ready and an old one is currently controlling.
+                window.dispatchEvent(new CustomEvent('ktt-update-ready'));
+              }
+            });
+          });
+        })
         .catch(err => console.error('SW registration failed', err));
+
+      // When the new SW activates, it messages us; offer a one-tap reload.
+      navigator.serviceWorker.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'SW_ACTIVATED') {
+          window.KTT_APP_VERSION = e.data.version;
+        }
+      });
+    });
+
+    // A controllerchange means a new SW took over — reload to run fresh code,
+    // but never yank the page out from under an in-progress test.
+    let _reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (_reloaded) return;
+      const testActive = !!(window.kttManual && typeof window.kttManual.isTestActive === 'function'
+        && window.kttManual.isTestActive());
+      if (testActive) {
+        console.log('KTT: update ready, deferring reload until test ends');
+        window.dispatchEvent(new CustomEvent('ktt-update-ready'));
+        return;
+      }
+      _reloaded = true;
+      location.reload();
     });
   }
 </script>

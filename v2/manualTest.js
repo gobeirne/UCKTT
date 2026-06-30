@@ -50,10 +50,14 @@
   let scoringMode   = 'free';
   let currentLevel  = DEFAULT_LEVEL;
   let armedKupu     = null;
-  let showLabels    = true;
+  let labelMode     = 'both';   // 'off' | 'child' | 'clinician' | 'both'
+  // Derived helpers — keep older boolean call sites working.
+  const clinicianLabelsOn = () => labelMode === 'clinician' || labelMode === 'both';
+  const childLabelsOn     = () => labelMode === 'child'     || labelMode === 'both';
   let scores        = {};
   let levelsUsed    = [];
   let clinicianViewMode = 'words';
+  let autoAccept    = 'never';  // 'never' | 'correct' | 'always'
   let sessionMeta   = { clientName: '', nhi: '', dob: '', testDate: '', clinicianName: '', clinicianRole: '', location: '' };
   let sessionNotes  = '';
   let carrierAudio  = null;
@@ -109,7 +113,7 @@
       currentLevel,
       notes:       sessionNotes,
       scoringMode,
-      showLabels,
+      labelMode,
       clinicianViewMode,
       pipCount,
     };
@@ -133,11 +137,13 @@
     currentLevel      = session.currentLevel || DEFAULT_LEVEL;
     sessionNotes      = session.notes || '';
     scoringMode       = session.scoringMode || 'free';
-    showLabels        = session.showLabels !== undefined ? session.showLabels : true;
+    // Migrate legacy boolean showLabels → labelMode if needed.
+    if (session.labelMode) labelMode = session.labelMode;
+    else if (session.showLabels !== undefined) labelMode = session.showLabels ? 'both' : 'off';
     clinicianViewMode = session.clinicianViewMode || 'words';
     currentSessionId  = session.sessionId;
     armedKupu         = null;
-    saveSettings({ activeListId, scoringMode, showLabels, clinicianViewMode });
+    saveSettings({ activeListId, scoringMode, labelMode, clinicianViewMode });
     renderTestScreen();
     showView('manualTestView');
   }
@@ -403,6 +409,9 @@
     if (S.scoringMode) scoringMode = S.scoringMode;
     if (S.activeListId) activeListId = S.activeListId;
     if (S.clinicianViewMode) clinicianViewMode = S.clinicianViewMode;
+    if (S.labelMode) labelMode = S.labelMode;
+    else if (S.showLabels !== undefined) labelMode = S.showLabels ? 'both' : 'off';
+    if (S.autoAccept) autoAccept = S.autoAccept;
     if (!activeListId && allLists.length) activeListId = allLists[0].id;
 
     root.innerHTML = '';
@@ -435,6 +444,7 @@
     const right = el('div', { cls: 'mt-setup-right' });
     body.appendChild(right);
     right.appendChild(sect('Clinician view during test', renderViewToggle()));
+    right.appendChild(sect('Auto-accept child responses', renderAutoAcceptToggle()));
     right.appendChild(sect('', renderActions()));
     right.appendChild(sect('Clinic / report settings', renderClinicSettings()));
     right.appendChild(sect('Custom lists', renderImportExport()));
@@ -598,6 +608,29 @@
     });
 
     return wrap;
+  }
+
+  function renderAutoAcceptToggle() {
+    const card = el('div', { cls: 'mt-card' });
+    const seg  = el('div', { cls: 'mt-seg' });
+    const OPTS = [
+      { mode: 'never',   label: 'Never' },
+      { mode: 'correct', label: 'If correct' },
+      { mode: 'always',  label: 'Always' },
+    ];
+    OPTS.forEach(o => {
+      seg.appendChild(el('button', {
+        cls: 'mt-seg-btn' + (autoAccept === o.mode ? ' on' : ''),
+        onclick: () => { autoAccept = o.mode; saveSettings({ autoAccept }); renderSetupScreen(); }
+      }, o.label));
+    });
+    const hint = {
+      never:   'Clinician confirms every response (default).',
+      correct: 'A correct tap is scored automatically; wrong taps still ask.',
+      always:  'Every tap is scored automatically by match — no confirmation.',
+    }[autoAccept];
+    card.append(seg, el('div', { cls: 'mt-hint-text', style: 'margin-top:6px' }, hint));
+    return card;
   }
 
   function renderViewToggle() {
@@ -779,7 +812,9 @@
     currentLevel     = DEFAULT_LEVEL;
     const S = loadSettings();
     if (S.lastLevel) currentLevel = parseInt(S.lastLevel) || DEFAULT_LEVEL;
-    if (S.showLabels !== undefined) showLabels = !!S.showLabels;
+    if (S.labelMode) labelMode = S.labelMode;
+    else if (S.showLabels !== undefined) labelMode = S.showLabels ? 'both' : 'off';
+    if (S.autoAccept) autoAccept = S.autoAccept;
 
     if (window.kttPaired?.isConnected()) window.kttPaired.sendSync();
 
@@ -819,19 +854,33 @@
     infoBar.appendChild(el('div', { cls: 'mt-info-list' }, list.name));
     infoBar.appendChild(el('div', { cls: 'mt-info-mode' }, SCORING_MODES[scoringMode].label));
 
-    // Label toggle
-    const labelToggle = el('label', { cls: 'mt-label-toggle', title: 'Show kupu text labels' });
-    const labelCb = el('input', { type: 'checkbox' });
-    labelCb.checked = showLabels;
-    labelCb.onchange = () => {
-      showLabels = labelCb.checked;
-      saveSettings({ showLabels });
-      refreshScoringTable();
-      // Propagate to responder
-      if (window.kttPaired?.isConnected()) window.kttPaired.sendDisplay(showLabels);
-    };
-    labelToggle.append(labelCb, ' labels (both screens)');
-    infoBar.appendChild(labelToggle);
+    // Label mode: off / child / clinician / both
+    const labelWrap = el('div', { cls: 'mt-label-seg', title: 'Where to show kupu text labels' });
+    labelWrap.appendChild(el('span', { cls: 'mt-label-seg-title' }, 'Labels:'));
+    const LABEL_OPTS = [
+      { mode: 'off',       text: 'Off' },
+      { mode: 'child',     text: 'Child' },
+      { mode: 'clinician', text: 'Clinician' },
+      { mode: 'both',      text: 'Both' },
+    ];
+    LABEL_OPTS.forEach(opt => {
+      const btn = el('button', {
+        cls: 'mt-label-seg-btn' + (labelMode === opt.mode ? ' on' : ''),
+        title: opt.mode === 'off' ? 'No labels on either screen'
+          : opt.mode === 'child' ? "Labels on the child's device only"
+          : opt.mode === 'clinician' ? "Labels on the clinician's screen only"
+          : 'Labels on both screens',
+      }, opt.text);
+      btn.onclick = () => {
+        labelMode = opt.mode;
+        saveSettings({ labelMode });
+        refreshScoringTable();
+        // Tell the responder whether ITS labels should show.
+        if (window.kttPaired?.isConnected()) window.kttPaired.sendDisplay(childLabelsOn());
+      };
+      labelWrap.appendChild(btn);
+    });
+    infoBar.appendChild(labelWrap);
 
     infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
       onclick: () => printImageSheet() }, '🖨'));
@@ -965,7 +1014,7 @@
       const imgEl = el('img', { cls: 'mt-kupu-img', alt: kupu });
       if (window.loadKupuImage) window.loadKupuImage(imgEl, kupu);
       else imgEl.src = `Images/${encodeURIComponent(kupu)}.png`;
-      if (showLabels) {
+      if (clinicianLabelsOn()) {
         const lbl = el('div', { cls: 'mt-kupu-img-label' }, kupu);
         const wrap = el('div', { cls: 'mt-kupu-img-wrap' + (isArmed ? ' armed' : '') });
         wrap.append(imgEl, lbl);
@@ -1100,20 +1149,45 @@
 
   // Called by pairedMode.js when responder taps a kupu
   function onPairResponse(kupu) {
+    const isCorrect = (kupu === armedKupu);
+    const target = armedKupu;   // snapshot — armed kupu may change during the delay
+
+    // Auto-accept handling (#10):
+    //   never   → always ask the clinician (show confirm bar)
+    //   correct → auto-confirm only when the tap matches the target; else ask
+    //   always  → auto-confirm using the tap's correctness, never ask
+    if (autoAccept === 'always' || (autoAccept === 'correct' && isCorrect)) {
+      // Briefly flash what was tapped, then auto-confirm.
+      const bar   = document.getElementById('mt-confirm-bar');
+      const label = document.getElementById('mt-confirm-kupu');
+      if (label) label.textContent = kupu;
+      if (bar) {
+        bar.style.display = 'flex';
+        setTimeout(() => { confirmPeerResponse(isCorrect, target); }, 450);
+      } else {
+        confirmPeerResponse(isCorrect, target);
+      }
+      return;
+    }
+
+    // Manual path — show the confirm bar for the clinician to judge.
     const bar   = document.getElementById('mt-confirm-bar');
     const label = document.getElementById('mt-confirm-kupu');
     if (bar)   { bar.style.display = 'flex'; }
     if (label) { label.textContent = kupu; }
   }
 
-  function confirmPeerResponse(correct) {
+  function confirmPeerResponse(correct, targetKupu) {
     if (window.kttPaired) window.kttPaired.sendConfirm(correct);
     const bar = document.getElementById('mt-confirm-bar');
     if (bar) bar.style.display = 'none';
-    // Auto-score: add a pip for the armed kupu at current level
-    if (armedKupu) {
-      ensurePipSlot(armedKupu, currentLevel);
-      const pips = getPips(armedKupu, currentLevel);
+    // Auto-score: add a pip for the target kupu at current level. The auto-accept
+    // path passes the kupu that was armed when the tap arrived, so a fast re-arm
+    // during the brief confirm delay can't misplace the pip.
+    const scoreKupu = targetKupu || armedKupu;
+    if (scoreKupu) {
+      ensurePipSlot(scoreKupu, currentLevel);
+      const pips = getPips(scoreKupu, currentLevel);
       const emptyIdx = pips.indexOf('empty');
       if (emptyIdx >= 0) {
         pips[emptyIdx] = correct ? 'correct' : 'incorrect';
@@ -1820,6 +1894,10 @@ ${lvls.length ? `
 
   window.kttManual = { rebuildAllLists, renderSetupScreen, showView,
     onPairResponse, onPairReady, onPairResponderWaiting,
-    getActiveListForPair, getShowLabels: () => showLabels };
+    getActiveListForPair, getShowLabels: () => childLabelsOn(),
+    isTestActive: () => {
+      const v = document.getElementById('manualTestView');
+      return !!(v && v.classList.contains('active'));
+    } };
 
 })();

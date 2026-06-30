@@ -172,7 +172,10 @@
     // which re-initialises WebRTC machinery and causes disconnect event storms
     appendPairEl();
     if (pairEl._fb?.initialized) {
-      kttLog('🔥', 'Firebase already initialized');
+      kttLog('🔥', 'Firebase already initialized — refreshing auth token');
+      // After flight-mode/network loss the cached token can be stale; force a
+      // refresh so beacon reads/writes don't silently fail.
+      try { await pairEl._ensureFreshAuth(); } catch (_) { kttWarn('🔥', 'Auth refresh failed'); }
       return pairEl._fb;
     }
     kttLog('🔥', 'Waiting for Firebase + auth to init (up to 4s)…');
@@ -654,6 +657,7 @@
         ${row('ICE state', ls.iceState || '—')}
         ${row('PC state', ls.connState || '—')}
         ${row('Data channel', ls.dcState || '—')}
+        ${row('App version', window.KTT_APP_VERSION || '—')}
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-top:1px solid #eee">
         <button class="ktt-diag-btn" id="ktt-diag-reconnect"

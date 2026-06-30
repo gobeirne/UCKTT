@@ -885,6 +885,7 @@
         projectId: "ucpairing"
       });
       this._fb.auth = getAuth(this._fb.app);
+      this._fb.signInAnonymously = signInAnonymously;   // kept for re-auth after network loss
 
       onAuthStateChanged(this._fb.auth, (user) => {
         if (!user) signInAnonymously(this._fb.auth).catch(() => {});
@@ -900,6 +901,31 @@
       this._fb.onSnapshot = onSnapshot;
       this._fb.initialized = true;
       this._log('Firebase ready');
+    }
+
+    /**
+     * Guarantee a valid auth token before any signalling read/write.
+     * After flight-mode / network loss, the anonymous token can be expired
+     * but not yet null (the SDK couldn't reach the server to notice), so
+     * onAuthStateChanged never fires and getDoc/setDoc silently fail. We
+     * force a token refresh and, if that fails, re-sign-in anonymously.
+     */
+    async _ensureFreshAuth() {
+      try {
+        await this._ensureFirebase();
+        const user = this._fb.auth && this._fb.auth.currentUser;
+        if (!user) {
+          this._log('No auth user — re-signing in');
+          await this._fb.signInAnonymously(this._fb.auth);
+          return;
+        }
+        // Force-refresh the ID token; throws if the session is truly dead.
+        await user.getIdToken(true);
+      } catch (err) {
+        this._log('Auth refresh failed, re-signing in:', err && err.message);
+        try { await this._fb.signInAnonymously(this._fb.auth); }
+        catch (e2) { this._log('Re-sign-in failed:', e2 && e2.message); throw e2; }
+      }
     }
 
     /* ================================================================
@@ -1250,7 +1276,7 @@
      * ================================================================ */
     async _controllerGenerateCode() {
       try {
-        await this._ensureFirebase();
+        await this._ensureFreshAuth();
       } catch (e) {
         this._showStatus('#controllerStatus', '⚠️ No internet connection detected', 'error');
         this._$('#btnLanQR').style.display = 'inline';
@@ -1337,7 +1363,7 @@
       _disableBtn();
 
       try {
-        await this._ensureFirebase();
+        await this._ensureFreshAuth();
       } catch (e) {
         this._showStatus('#responderStatus', '⚠️ No internet. Use "Scan QR Code" option below.', 'error');
         _enableBtn();
@@ -1700,11 +1726,17 @@
     document.querySelectorAll('rapid-pair').forEach(el => el._cleanup());
   });
 
-  // Register service worker for offline support
+  // Service worker: RapidPair caching is now handled by the app's sw.js
+  // (registered in index.html). We no longer register a separate SW here.
+  // Any rapidpair-sw.js still installed on a device will self-unregister.
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./rapidpair-sw.js').catch(() => {});
-    });
+    navigator.serviceWorker.getRegistrations?.().then(regs => {
+      regs.forEach(r => {
+        if (r.active && r.active.scriptURL && r.active.scriptURL.includes('rapidpair-sw')) {
+          r.unregister().catch(() => {});
+        }
+      });
+    }).catch(() => {});
   }
 
   console.log('[RapidPair] Web Component loaded');
