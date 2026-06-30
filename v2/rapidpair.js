@@ -376,6 +376,22 @@
       this._snapshotUnsub = null;
       this._hadPreviousConnection = false;
       this._initialized = false;
+
+      // ── Heartbeat / liveness (application-level keepalive) ──────────────
+      // ICE state changes are unreliable on mobile when a peer locks/backgrounds
+      // the device, so we run our own ping/ack watchdog over the DataChannel.
+      this._hbInterval   = null;   // sends pings
+      this._hbWatchdog   = null;   // checks liveness
+      this._hbLastSeen   = 0;      // ts of last inbound traffic of ANY kind
+      this._hbLastPingTs  = 0;     // ts we last sent a ping (for RTT)
+      this._hbRtt        = null;   // measured round-trip in ms
+      this._hbState      = 'idle'; // idle | live | stale | dead
+      this._hbPingMs     = 2000;   // ping cadence
+      this._hbStaleMs    = 3000;   // no traffic for this long → stale (amber)
+      this._hbDeadMs     = 7000;   // no traffic for this long → dead (red)
+      this._hbDeadSince  = 0;      // ts we entered dead/recovery (0 = not dead)
+      this._hbRecoverMs  = 30000;  // keep nursing a dead link this long before teardown
+      this._pairMethod   = null;   // 'lan' (QR/offline) | 'stun' | 'turn'
     }
 
     connectedCallback() {
@@ -434,6 +450,8 @@
 
     /** End the connection. */
     disconnect() {
+      this._stopHeartbeat();
+      this._setLinkState('idle', true);
       if (this._snapshotUnsub) { try { this._snapshotUnsub(); } catch (_) {} this._snapshotUnsub = null; }
       if (this._dc) try { this._dc.close(); } catch (_) {}
       if (this._pc) try { this._pc.close(); } catch (_) {}
@@ -888,6 +906,7 @@
      *  WebRTC PEER CONNECTION
      * ================================================================ */
     async _newPC(config = 'lan') {
+      this._pairMethod = config;   // 'lan' (QR/offline) | 'stun' | 'turn'
       let cfg;
       if (config === 'lan') cfg = { iceServers: [] };
       else if (config === 'stun') cfg = { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] };
@@ -896,12 +915,27 @@
       const p = new RTCPeerConnection(cfg);
 
       p.oniceconnectionstatechange = () => {
-        if (p.iceConnectionState === 'failed' || p.iceConnectionState === 'disconnected') this._handleDisconnect();
+        const ice = p.iceConnectionState;
+        this._log('ICE state:', ice);
+        if (ice === 'failed' || ice === 'closed') {
+          // Terminal: ICE has given up. Hand off to (assisted) reconnect.
+          this._handleDisconnect();
+        } else if (ice === 'disconnected') {
+          // Transient: WebRTC often self-heals this. Don't tear down —
+          // just flag the link unstable and let the heartbeat track recovery.
+          this._setLinkState('stale');
+        } else if (ice === 'connected' || ice === 'completed') {
+          // Recovered (or first connect): refresh liveness.
+          this._hbLastSeen = Date.now();
+          this._setLinkState('live');
+        }
       };
       p.onconnectionstatechange = () => {
         const s = p.connectionState;
+        this._log('PC state:', s);
         if (s === 'connected' && this._dc && this._dc.readyState === 'open') this._onConnected();
-        else if (s === 'failed' || s === 'disconnected') this._handleDisconnect();
+        else if (s === 'failed' || s === 'closed') this._handleDisconnect();
+        // 'disconnected' here is also transient — intentionally not torn down.
       };
       p.ondatachannel = (e) => { this._dc = e.channel; this._attachDC(); };
       return p;
@@ -962,6 +996,11 @@
     _routeMessage(plaintext) {
       try {
         const msg = JSON.parse(plaintext);
+        // Heartbeat control messages are internal — consume before app routing.
+        if (msg.t === '__hb' || msg.t === '__hbk') {
+          this._handleHeartbeatMessage(msg);
+          return;
+        }
         if (msg.t && this._listeners[msg.t]) {
           this._listeners[msg.t].forEach(cb => {
             try { cb(msg.p); } catch (err) { console.error('[RapidPair] Listener error:', err); }
@@ -1025,6 +1064,9 @@
         detail: { role: this._role, verifyCode: this._secureChan.verifyCode }
       }));
 
+      // Link is now verified and usable — begin liveness monitoring.
+      this._startHeartbeat();
+
       // Auto-close modal
       if (this._autoClose) {
         this._log('Auto-closing modal');
@@ -1045,6 +1087,8 @@
     }
 
     _handleDisconnect() {
+      this._stopHeartbeat();
+      this._setLinkState('idle', true);
       this._secureChan = null;
       this.dispatchEvent(new CustomEvent('disconnected', { detail: {} }));
       // If we had a previous role, allow reconnect by reopening modal
@@ -1060,6 +1104,8 @@
     }
 
     _resetInactivityTimer() {
+      // Any inbound traffic counts as proof-of-life for the heartbeat watchdog.
+      this._hbLastSeen = Date.now();
       clearTimeout(this._inactivityTimer);
       this._inactivityTimer = setTimeout(() => {
         if (this._pc && this._pc.connectionState === 'connected') {
@@ -1069,7 +1115,123 @@
       }, 2 * 60 * 60 * 1000);
     }
 
+    /* ================================================================
+     *  HEARTBEAT / LIVENESS
+     *  App-level keepalive that does NOT trust ICE state alone. Both peers
+     *  ping every _hbPingMs; any inbound traffic refreshes _hbLastSeen. A
+     *  watchdog grades the link live/stale/dead. "dead" does NOT tear the
+     *  connection down — it enters a recovery window so a frozen/locked peer
+     *  can resume silently. Teardown only on genuine PC failure or after the
+     *  recovery grace period elapses.
+     * ================================================================ */
+    _startHeartbeat() {
+      this._stopHeartbeat();
+      this._hbLastSeen = Date.now();
+      this._hbDeadSince = 0;        // when we first went dead (0 = not dead)
+      this._setLinkState('live', true);
+
+      this._hbInterval = setInterval(() => {
+        if (!this._dc || this._dc.readyState !== 'open') return;
+        this._hbLastPingTs = Date.now();
+        // Keep pinging even while "dead" — this is how we detect silent recovery.
+        this._sendRaw(JSON.stringify({ t: '__hb', p: { ts: this._hbLastPingTs } }));
+      }, this._hbPingMs);
+
+      this._hbWatchdog = setInterval(() => {
+        const age = Date.now() - this._hbLastSeen;
+        let next;
+        if (age > this._hbDeadMs)       next = 'dead';
+        else if (age > this._hbStaleMs) next = 'stale';
+        else                            next = 'live';
+
+        if (next === 'dead') {
+          // Enter / remain in recovery. Do NOT close the connection — the
+          // underlying PC may still be viable and resume on its own.
+          if (!this._hbDeadSince) {
+            this._hbDeadSince = Date.now();
+            this._log('Heartbeat: link went dead — entering recovery (connection kept alive)');
+          }
+          const deadFor = Date.now() - this._hbDeadSince;
+          const pcGone = this._pc &&
+            (this._pc.connectionState === 'failed' || this._pc.connectionState === 'closed' ||
+             this._pc.iceConnectionState === 'failed' || this._pc.iceConnectionState === 'closed');
+
+          // Escalate to real teardown only if the PC itself has failed, or we've
+          // waited out the full recovery grace window with no resumption.
+          if (pcGone || deadFor > this._hbRecoverMs) {
+            this._log(`Heartbeat: recovery failed (deadFor=${deadFor}ms, pcGone=${!!pcGone}) — disconnecting`);
+            this._setLinkState('dead');
+            this._stopHeartbeat();
+            this._handleDisconnect();
+            return;
+          }
+          this._setLinkState('dead'); // red badge, but link still being nursed
+        } else {
+          // Traffic resumed (or never lost) — clear any recovery state.
+          if (this._hbDeadSince) {
+            this._log('Heartbeat: link recovered silently');
+            this._hbDeadSince = 0;
+            this.dispatchEvent(new CustomEvent('linkrecovered', { detail: { role: this._role } }));
+          }
+          this._setLinkState(next);
+        }
+      }, 1000);
+    }
+
+    _stopHeartbeat() {
+      if (this._hbInterval) { clearInterval(this._hbInterval); this._hbInterval = null; }
+      if (this._hbWatchdog) { clearInterval(this._hbWatchdog); this._hbWatchdog = null; }
+      this._hbDeadSince = 0;
+    }
+
+    // Handle the heartbeat control messages. Returns true if msg was consumed.
+    _handleHeartbeatMessage(msg) {
+      if (msg.t === '__hb') {
+        // Reply with an ack echoing their timestamp so they can compute RTT.
+        this._sendRaw(JSON.stringify({ t: '__hbk', p: { ts: msg.p && msg.p.ts } }));
+        return true;
+      }
+      if (msg.t === '__hbk') {
+        if (msg.p && typeof msg.p.ts === 'number') {
+          this._hbRtt = Date.now() - msg.p.ts;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    _setLinkState(state, force) {
+      if (!force && state === this._hbState) return;
+      this._hbState = state;
+      this.dispatchEvent(new CustomEvent('linkquality', {
+        detail: {
+          state,
+          lastSeenMs: Date.now() - this._hbLastSeen,
+          rtt: this._hbRtt,
+          role: this._role
+        }
+      }));
+    }
+
+    /** Public: current liveness snapshot for diagnostic panels. */
+    getLinkStatus() {
+      return {
+        state: this._hbState,
+        lastSeenMs: this._hbLastSeen ? Date.now() - this._hbLastSeen : null,
+        rtt: this._hbRtt,
+        role: this._role,
+        pairMethod: this._pairMethod,
+        verifyCode: this._secureChan ? this._secureChan.verifyCode : null,
+        recoverMs: this._hbRecoverMs,
+        deadForMs: this._hbDeadSince ? Date.now() - this._hbDeadSince : 0,
+        iceState: this._pc ? this._pc.iceConnectionState : null,
+        connState: this._pc ? this._pc.connectionState : null,
+        dcState: this._dc ? this._dc.readyState : null
+      };
+    }
+
     _cleanup() {
+      this._stopHeartbeat();
       clearTimeout(this._inactivityTimer);
       clearTimeout(this._autoTimer);
       clearTimeout(this._autoTimerResponder);

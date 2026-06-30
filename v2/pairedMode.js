@@ -356,6 +356,8 @@
     pairEl.addEventListener('secure',       onSecure);
     pairEl.addEventListener('disconnected', onDisconnected);
     pairEl.addEventListener('reconnected',  onReconnected);
+    pairEl.addEventListener('linkquality',  onLinkQuality);
+    pairEl.addEventListener('linkrecovered',onLinkRecovered);
 
     pairEl.on('ktt-response',    onKttResponse);
     pairEl.on('ktt-sync',        onKttSync);
@@ -367,8 +369,11 @@
     pairEl.on('ktt-hello',       onKttHello);
     pairEl.on('ktt-ready',       onKttReadyReceived);
     pairEl.on('ktt-display',     onKttDisplay);
+    pairEl.on('ktt-bg',          onKttBackground);
 
     kttLog('🚀', 'All listeners registered. pairEl NOT in DOM yet.');
+
+    wireBackgroundDetection();
 
     if (new URLSearchParams(location.search).get('role') === 'responder') {
       kttLog('🔗', '?role=responder detected — auto-opening modal');
@@ -463,6 +468,8 @@
     _disconnectDebounce = setTimeout(() => {
       if (pairSecure) return; // reconnected in the meantime
       pairSecure = false;
+      _link = { state: 'idle', lastSeenMs: null, rtt: null };
+      _peerBackgrounded = false;
       kttLog('❌', 'DISCONNECTED');
       updateStatusBadge('disconnected');
     }, 500);
@@ -479,19 +486,243 @@
     }
   }
 
-  // ─── Status badge ─────────────────────────────────────────────────────────
+  // ─── Status badge + diagnostic panel ──────────────────────────────────────
+  //
+  // The badge now reflects real link liveness (live/stale/dead), not just
+  // paired/not-paired, and is clickable to open the diagnostic panel.
 
-  function updateStatusBadge(state) {
+  // Last-known connection summary, kept fresh by onLinkQuality.
+  let _link = { state: 'idle', lastSeenMs: null, rtt: null };
+  let _peerBackgrounded = false;   // set when the OTHER device reports backgrounding
+  let _selfBackgrounded  = false;  // set when THIS device is backgrounded
+  let _panelTimer = null;
+
+  const BADGE_STYLES = {
+    // logical state → presentation
+    idle:         { dot: '#bbb',    text: 'Not paired',     bg: '#f5f5f5', color: '#888',    border: '#ddd'    },
+    live:         { dot: '#2e7d32', text: 'Connected',      bg: '#e8f5e9', color: '#2e7d32', border: '#a5d6a7' },
+    stale:        { dot: '#f9a825', text: 'Unstable',       bg: '#fff8e1', color: '#e65100', border: '#ffcc80' },
+    dead:         { dot: '#c62828', text: 'Reconnecting…',  bg: '#fdecea', color: '#c62828', border: '#f5b5ae' },
+    disconnected: { dot: '#c62828', text: 'Disconnected',   bg: '#fdecea', color: '#c62828', border: '#f5b5ae' },
+  };
+
+  function badgeStateFromLink() {
+    if (!pairSecure && _link.state === 'idle') return 'idle';
+    if (_link.state === 'live')  return 'live';
+    if (_link.state === 'stale') return 'stale';
+    if (_link.state === 'dead')  return 'dead';
+    if (!pairSecure)             return 'disconnected';
+    return 'live';
+  }
+
+  function updateStatusBadge(stateOverride) {
     const el = document.getElementById('ktt-pair-status');
     if (!el) return;
-    const map = {
-      connected:    { text: '🔒 Paired',         bg: '#e8f5e9', color: '#2e7d32', border: '#a5d6a7' },
-      disconnected: { text: '⚠ Disconnected',    bg: '#fff8e1', color: '#e65100', border: '#ffcc80' },
-      idle:         { text: '📱 Not paired',      bg: '#f5f5f5', color: '#888',    border: '#ddd'    },
+    // Accept legacy calls ('connected'/'disconnected'/'idle') and new liveness states.
+    let key = stateOverride;
+    if (key === 'connected') key = 'live';
+    if (!key) key = badgeStateFromLink();
+    const s = BADGE_STYLES[key] || BADGE_STYLES.idle;
+    const warn = (_peerBackgrounded || _selfBackgrounded) ? ' ⚠' : '';
+    el.innerHTML =
+      `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;`
+      + `background:${s.dot};margin-right:5px;vertical-align:middle"></span>${s.text}${warn}`;
+    el.style.cssText =
+      `display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;`
+      + `font-weight:600;cursor:pointer;background:${s.bg};color:${s.color};border:1px solid ${s.border}`;
+    el.title = 'Tap for connection diagnostics';
+    if (!el._diagBound) {
+      el.addEventListener('click', toggleDiagPanel);
+      el._diagBound = true;
+    }
+    // Keep the panel in sync if it's open.
+    if (document.getElementById('ktt-diag-panel')) renderDiagPanel();
+  }
+
+  function onLinkQuality(e) {
+    _link = e.detail || _link;
+    updateStatusBadge();
+  }
+
+  function onLinkRecovered() {
+    kttLog('💚', 'Link recovered silently');
+    _peerBackgrounded = false;
+    updateStatusBadge();
+  }
+
+  // ─── Diagnostic panel ─────────────────────────────────────────────────────
+
+  function toggleDiagPanel() {
+    const existing = document.getElementById('ktt-diag-panel');
+    if (existing) { closeDiagPanel(); return; }
+    openDiagPanel();
+  }
+
+  function openDiagPanel() {
+    let p = document.getElementById('ktt-diag-panel');
+    if (p) return;
+    p = document.createElement('div');
+    p.id = 'ktt-diag-panel';
+    p.style.cssText =
+      'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;'
+      + 'width:min(420px,92vw);max-height:88vh;overflow:auto;background:#fff;color:#222;'
+      + 'border:1px solid #ccc;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.28);'
+      + 'font-family:system-ui,-apple-system,sans-serif;font-size:13px;';
+    document.body.appendChild(p);
+    renderDiagPanel();
+    // Live-refresh while open.
+    clearInterval(_panelTimer);
+    _panelTimer = setInterval(renderDiagPanel, 500);
+  }
+
+  function closeDiagPanel() {
+    clearInterval(_panelTimer); _panelTimer = null;
+    const p = document.getElementById('ktt-diag-panel');
+    if (p) p.remove();
+  }
+
+  function fmtMs(ms) {
+    if (ms == null) return '—';
+    if (ms < 1000) return Math.round(ms) + ' ms';
+    return (ms / 1000).toFixed(1) + ' s';
+  }
+
+  function renderDiagPanel() {
+    const p = document.getElementById('ktt-diag-panel');
+    if (!p) return;
+    const ls = (pairEl && typeof pairEl.getLinkStatus === 'function')
+      ? pairEl.getLinkStatus() : {};
+    const state = badgeStateFromLink();
+    const sty = BADGE_STYLES[state] || BADGE_STYLES.idle;
+
+    const stateReason = {
+      live:  'Data flowing normally.',
+      stale: 'No recent data — link may be briefly interrupted.',
+      dead:  'No data. Holding the connection open and trying to recover.',
+      disconnected: 'Not connected.',
+      idle:  'No device paired.',
+    }[state] || '';
+
+    const methodLabel = ls.pairMethod === 'lan'
+      ? 'LAN / QR (offline)'
+      : ls.pairMethod === 'turn' ? 'Relay (TURN)'
+      : ls.pairMethod === 'stun' ? 'Direct (STUN)'
+      : '—';
+
+    // Recovery countdown when nursing a dead link.
+    let recoveryRow = '';
+    if (state === 'dead' && ls.recoverMs) {
+      const left = Math.max(0, ls.recoverMs - (ls.deadForMs || 0));
+      recoveryRow = row('Auto-recovery', `gives up in ${fmtMs(left)}`);
+    }
+
+    // Backgrounding warnings.
+    let bgWarn = '';
+    if (_selfBackgrounded || _peerBackgrounded) {
+      const who = _selfBackgrounded && _peerBackgrounded ? 'Both devices have'
+        : _selfBackgrounded ? 'This device has' : 'The other device has';
+      bgWarn = `<div style="margin:10px 12px;padding:8px 10px;background:#fff3cd;`
+        + `border:1px solid #ffe08a;border-radius:8px;color:#7a5b00;font-size:12px">`
+        + `⚠ ${who} left the app in the background. The connection is being held open.</div>`;
+    }
+
+    // Re-pair button only mentions QR if THIS session actually used it.
+    const repairNote = ls.pairMethod === 'lan'
+      ? 'Starts fresh pairing (QR scan needed offline).'
+      : 'Starts fresh pairing on a new device.';
+
+    p.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  padding:14px 16px;border-bottom:1px solid #eee">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="width:11px;height:11px;border-radius:50%;background:${sty.dot}"></span>
+          <strong style="font-size:15px">${sty.text}</strong>
+          <span style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.04em">
+            ${ls.role || '—'}</span>
+        </div>
+        <button id="ktt-diag-close" style="border:none;background:none;font-size:20px;
+                cursor:pointer;color:#999;line-height:1">&times;</button>
+      </div>
+      <div style="padding:4px 12px 0;color:#666;font-size:12px">${stateReason}</div>
+      ${bgWarn}
+      <div style="padding:10px 4px">
+        ${row('Round-trip', ls.rtt != null ? Math.round(ls.rtt) + ' ms' : '—')}
+        ${row('Last packet', fmtMs(ls.lastSeenMs))}
+        ${recoveryRow}
+        ${row('Method', methodLabel)}
+        ${row('Verify code', ls.verifyCode || '—')}
+        ${row('ICE state', ls.iceState || '—')}
+        ${row('PC state', ls.connState || '—')}
+        ${row('Data channel', ls.dcState || '—')}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-top:1px solid #eee">
+        <button class="ktt-diag-btn" id="ktt-diag-reconnect"
+                style="background:#1a5fa5;color:#fff;border:none">Reconnect</button>
+        <button class="ktt-diag-btn" id="ktt-diag-repair">Re-pair / switch device</button>
+        <button class="ktt-diag-btn" id="ktt-diag-disconnect"
+                style="color:#c62828">Disconnect</button>
+      </div>
+      <div style="padding:0 16px 14px;color:#999;font-size:11px">${repairNote}</div>
+    `;
+
+    p.querySelector('#ktt-diag-close').onclick = closeDiagPanel;
+    p.querySelector('#ktt-diag-reconnect').onclick = () => {
+      kttLog('🔁', 'Manual reconnect from panel');
+      openPairModal();
     };
-    const s = map[state] || map.idle;
-    el.textContent = s.text;
-    el.style.cssText = `display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:${s.bg};color:${s.color};border:1px solid ${s.border}`;
+    p.querySelector('#ktt-diag-repair').onclick = () => {
+      kttLog('♻️', 'Re-pair from scratch from panel');
+      if (!confirm('Start fresh pairing? The current test will keep running.')) return;
+      clearReconnectState();
+      try { pairEl.disconnect(); } catch (_) {}
+      openPairModal();
+    };
+    p.querySelector('#ktt-diag-disconnect').onclick = () => {
+      kttLog('🔌', 'Manual disconnect from panel');
+      try { pairEl.disconnect(); } catch (_) {}
+      closeDiagPanel();
+    };
+  }
+
+  function row(label, value) {
+    return `<div style="display:flex;justify-content:space-between;padding:5px 12px;
+            border-bottom:1px solid #f4f4f4">
+            <span style="color:#888">${label}</span>
+            <span style="font-variant-numeric:tabular-nums;color:#333">${value}</span></div>`;
+  }
+
+  // ─── Backgrounding detection ──────────────────────────────────────────────
+  //
+  // Each device tells the peer when it is backgrounded / foregrounded, so the
+  // clinician (and, in dev, the child device too) can SEE the moment a device
+  // leaves the app — the common "kid navigated away" / "iPad locked" case that
+  // ICE is too slow to report. This complements the heartbeat: backgrounding is
+  // an explicit, instant signal; the heartbeat is the fallback when the device
+  // freezes before it can send anything.
+
+  function reportBackground(isBackground) {
+    if (!pairSecure) return;
+    try { pairEl.send('ktt-bg', { bg: isBackground, ts: Date.now() }); } catch (_) {}
+  }
+
+  function onKttBackground(p) {
+    _peerBackgrounded = !!(p && p.bg);
+    kttLog(_peerBackgrounded ? '🌙' : '☀️',
+      'Peer', _peerBackgrounded ? 'backgrounded' : 'foregrounded', 'the app');
+    updateStatusBadge();
+  }
+
+  function wireBackgroundDetection() {
+    document.addEventListener('visibilitychange', () => {
+      _selfBackgrounded = document.visibilityState === 'hidden';
+      kttLog(_selfBackgrounded ? '🌙' : '☀️',
+        'This device', _selfBackgrounded ? 'hidden' : 'visible');
+      // Tell the peer BEFORE we may get frozen (send is best-effort).
+      reportBackground(_selfBackgrounded);
+      updateStatusBadge();
+    });
+    // pagehide fires on navigation-away / tab close — last chance to warn the peer.
+    window.addEventListener('pagehide', () => { reportBackground(true); });
   }
 
   // ─── CONTROLLER — send helpers ────────────────────────────────────────────
