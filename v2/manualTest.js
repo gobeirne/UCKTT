@@ -58,6 +58,7 @@
   let levelsUsed    = [];
   let clinicianViewMode = 'words';
   let autoAccept    = 'never';  // 'never' | 'correct' | 'always'
+  let inTestSettings = false;   // true when editing settings mid-test (#6)
   let sessionMeta   = { clientName: '', nhi: '', dob: '', testDate: '', clinicianName: '', clinicianRole: '', location: '' };
   let sessionNotes  = '';
   let carrierAudio  = null;
@@ -242,6 +243,35 @@
     });
   }
 
+  function applyListChange(list) {
+    activeListId = list.id;
+    saveSettings({ activeListId });
+    if (window.kttPaired?.isConnected()) window.kttPaired.sendListReset(list.name);
+    if (inTestSettings) {
+      // The list changed, so the prior test is concluded. Begin a fresh session
+      // on the new list and drop back into the test screen.
+      inTestSettings = false;
+      startManualTest();
+      return;
+    }
+    renderSetupScreen();
+  }
+
+  // #6 — enter settings mid-test without ending the session.
+  function openSettingsDuringTest() {
+    stopAudio();
+    inTestSettings = true;
+    renderSetupScreen();
+    showView('manualSetupView');
+  }
+
+  // Return to the live test from mid-test settings.
+  function returnToTest() {
+    inTestSettings = false;
+    renderTestScreen();
+    showView('manualTestView');
+  }
+
   function navigateToSetup() {
     stopAudio();
     if (hasUnsavedScores()) {
@@ -265,7 +295,7 @@
     }
   }
 
-  function showUnsavedPrompt(onSave, onDiscard) {
+  function showUnsavedPrompt(onSave, onDiscard, headline) {
     const existing = document.getElementById('ktt-unsaved-prompt');
     if (existing) existing.remove();
 
@@ -278,7 +308,7 @@
     dlg.innerHTML = `
       <div style="background:#fff;border-radius:12px;padding:24px;max-width:340px;width:100%;
         font-family:system-ui,sans-serif;box-shadow:0 4px 32px rgba(0,0,0,.2)">
-        <div style="font-size:16px;font-weight:700;margin-bottom:8px">Unsaved results</div>
+        <div style="font-size:16px;font-weight:700;margin-bottom:8px">${headline || 'Unsaved results'}</div>
         <div style="font-size:14px;color:#555;margin-bottom:20px;line-height:1.5">
           This session has unsaved scores. Results are autosaved locally and available
           in Recent sessions, but you should save or print before leaving.
@@ -416,6 +446,16 @@
 
     root.innerHTML = '';
 
+    // Mid-test settings banner (#6): return to the live test without ending it.
+    if (inTestSettings) {
+      const banner = el('div', { cls: 'mt-intest-banner' });
+      banner.appendChild(el('span', {},
+        '⚙ Adjusting settings — your test is still running. Changes apply live; only switching list ends it.'));
+      banner.appendChild(el('button', { cls: 'mt-btn-sm-primary',
+        onclick: () => returnToTest() }, '← Back to test'));
+      root.appendChild(banner);
+    }
+
     // Header right: calibration link + debug log button
     const headerRight = el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap' });
     headerRight.appendChild(el('a', { cls: 'mt-btn', href: 'https://gobeirne.github.io/UCLing/', target: '_blank' },
@@ -484,10 +524,17 @@
     function listItem(list) {
       const item = el('div', { cls: 'mt-list-item' + (list.id === activeListId ? ' active' : ''),
         onclick: () => {
-          activeListId = list.id;
-          saveSettings({ activeListId });
-          if (window.kttPaired?.isConnected()) window.kttPaired.sendListReset(list.name);
-          renderSetupScreen();
+          // Changing the list during a live test invalidates the scores collected
+          // so far — this is the one "existential" change, so confirm first.
+          if (inTestSettings && list.id !== activeListId && hasUnsavedScores()) {
+            showUnsavedPrompt(
+              () => { saveResults(); applyListChange(list); },
+              () => { applyListChange(list); },
+              'Changing the list ends the current test.'
+            );
+            return;
+          }
+          applyListChange(list);
         },
         ondblclick: (e) => {
           e.stopPropagation();
@@ -885,8 +932,17 @@
     infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
       onclick: () => printImageSheet() }, '🖨'));
 
+    // Dip into settings without ending the test (#6).
+    infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
+      title: 'Adjust settings without ending the test',
+      onclick: () => openSettingsDuringTest() }, '⚙'));
+
     // Audio source toggle (only visible when paired)
     if (window.kttPaired?.isConnected()) {
+      infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
+        title: "See a live read-only view of the child's screen",
+        onclick: () => window.kttPaired.openMirror() }, '👁 Child view'));
+
       const audioSeg = el('div', { cls: 'mt-audio-src-seg', style: 'width:auto;margin-left:4px' });
       const currentlyResponder = window.kttPaired.getAudioFromResponder();
       ['This device', "Child's device"].forEach((lbl, i) => {
@@ -1157,16 +1213,10 @@
     //   correct → auto-confirm only when the tap matches the target; else ask
     //   always  → auto-confirm using the tap's correctness, never ask
     if (autoAccept === 'always' || (autoAccept === 'correct' && isCorrect)) {
-      // Briefly flash what was tapped, then auto-confirm.
-      const bar   = document.getElementById('mt-confirm-bar');
-      const label = document.getElementById('mt-confirm-kupu');
-      if (label) label.textContent = kupu;
-      if (bar) {
-        bar.style.display = 'flex';
-        setTimeout(() => { confirmPeerResponse(isCorrect, target); }, 450);
-      } else {
-        confirmPeerResponse(isCorrect, target);
-      }
+      // Score immediately, then show a result indicator that lingers and fades
+      // over ~3s so the clinician can register what the child chose.
+      confirmPeerResponse(isCorrect, target, true);
+      showAutoAcceptFlash(kupu, isCorrect);
       return;
     }
 
@@ -1177,10 +1227,16 @@
     if (label) { label.textContent = kupu; }
   }
 
-  function confirmPeerResponse(correct, targetKupu) {
+  function confirmPeerResponse(correct, targetKupu, keepBar) {
     if (window.kttPaired) window.kttPaired.sendConfirm(correct);
     const bar = document.getElementById('mt-confirm-bar');
-    if (bar) bar.style.display = 'none';
+    // Manual path hides immediately; auto path keeps the bar so it can fade.
+    if (bar && !keepBar) {
+      clearTimeout(bar._fadeT1);
+      bar.style.display = 'none';
+      bar.style.transition = 'none';
+      bar.style.opacity = '1';
+    }
     // Auto-score: add a pip for the target kupu at current level. The auto-accept
     // path passes the kupu that was armed when the tap arrived, so a fast re-arm
     // during the brief confirm delay can't misplace the pip.
@@ -1195,6 +1251,50 @@
         autosaveSession();
       }
     }
+  }
+
+  // Auto-accept visual: show what the child picked, tinted by correctness,
+  // then fade out over ~3s so the clinician can register it without it lingering.
+  function showAutoAcceptFlash(kupu, correct) {
+    const bar   = document.getElementById('mt-confirm-bar');
+    const label = document.getElementById('mt-confirm-label');
+    const kEl   = document.getElementById('mt-confirm-kupu');
+    if (!bar) return;
+
+    // Hide the manual Correct/Incorrect buttons — the decision is already made.
+    bar.querySelectorAll('button').forEach(b => { b.style.display = 'none'; });
+
+    const good = !!correct;
+    bar.style.background  = good ? '#e8f5e9' : '#ffebee';
+    bar.style.borderBottom = good ? '1px solid #4caf50' : '1px solid #e57373';
+    if (label) {
+      label.textContent = good ? '✓ Auto-accepted (correct):' : '✗ Auto-accepted (incorrect):';
+      label.style.color = good ? '#2e7d32' : '#c62828';
+      label.style.fontWeight = '700';
+    }
+    if (kEl) { kEl.textContent = kupu; kEl.style.color = good ? '#2e7d32' : '#c62828'; }
+
+    // Show fully, then fade opacity to 0 over 3s, then reset for reuse.
+    clearTimeout(bar._fadeT1); clearTimeout(bar._fadeT2);
+    bar.style.transition = 'none';
+    bar.style.display = 'flex';
+    bar.style.opacity = '1';
+    // Next frame: start the fade.
+    requestAnimationFrame(() => {
+      bar.style.transition = 'opacity 3s linear';
+      bar.style.opacity = '0';
+    });
+    // After the fade, hide and restore so the manual path works normally next time.
+    bar._fadeT1 = setTimeout(() => {
+      bar.style.display = 'none';
+      bar.style.transition = 'none';
+      bar.style.opacity = '1';
+      bar.style.background = '#fff3cd';
+      bar.style.borderBottom = '1px solid #ffc107';
+      if (label) { label.textContent = 'Child tapped:'; label.style.color = ''; label.style.fontWeight = ''; }
+      if (kEl) kEl.style.color = '';
+      bar.querySelectorAll('button').forEach(b => { b.style.display = ''; });
+    }, 3100);
   }
 
   // Exposed for pairedMode.js to call sendSync

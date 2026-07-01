@@ -116,6 +116,7 @@
     sendListReset,
     sendConfirm,
     setAudioSource,
+    openMirror,
     statusEl:             null,
   };
 
@@ -364,6 +365,8 @@
 
     pairEl.on('ktt-response',    onKttResponse);
     pairEl.on('ktt-sync',        onKttSync);
+    pairEl.on('ktt-mirror',      onKttMirror);
+    pairEl.on('ktt-mirror-req',  () => sendMirrorState());
     pairEl.on('ktt-image-chunk', onKttImageChunk);
     pairEl.on('ktt-play',        onKttPlay);
     pairEl.on('ktt-confirm',     onKttConfirm);
@@ -525,8 +528,12 @@
     let key = stateOverride;
     if (key === 'connected') key = 'live';
     if (!key) key = badgeStateFromLink();
+    // A backgrounding warning should visually dominate: show amber even if the
+    // link is otherwise "live", since a backgrounded peer can't respond.
+    const warnActive = (_peerBackgrounded || _selfBackgrounded);
+    if (warnActive && key === 'live') key = 'stale';
     const s = BADGE_STYLES[key] || BADGE_STYLES.idle;
-    const warn = (_peerBackgrounded || _selfBackgrounded) ? ' ⚠' : '';
+    const warn = warnActive ? ' ⚠' : '';
     el.innerHTML =
       `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;`
       + `background:${s.dot};margin-right:5px;vertical-align:middle"></span>${s.text}${warn}`;
@@ -693,6 +700,105 @@
             border-bottom:1px solid #f4f4f4">
             <span style="color:#888">${label}</span>
             <span style="font-variant-numeric:tabular-nums;color:#333">${value}</span></div>`;
+  }
+
+  // ─── Mirror view (controller sees the child's board, #2) ──────────────────
+  let _mirror = null;          // latest reported child board state
+  let _mirrorOpen = false;
+
+  function onKttMirror(p) {
+    _mirror = p || null;
+    if (_mirrorOpen) renderMirror();
+  }
+
+  function openMirror() {
+    _mirrorOpen = true;
+    // Ask the child to push its current board immediately.
+    if (pairSecure) { try { pairEl.send('ktt-mirror-req', {}); } catch (_) {} }
+    let m = document.getElementById('ktt-mirror-modal');
+    if (!m) {
+      m = document.createElement('div');
+      m.id = 'ktt-mirror-modal';
+      m.style.cssText =
+        'position:fixed;inset:0;z-index:100001;background:rgba(20,28,38,.82);'
+        + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+        + 'padding:18px;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif;';
+      document.body.appendChild(m);
+    }
+    renderMirror();
+  }
+
+  function closeMirror() {
+    _mirrorOpen = false;
+    const m = document.getElementById('ktt-mirror-modal');
+    if (m) m.remove();
+  }
+
+  function renderMirror() {
+    const m = document.getElementById('ktt-mirror-modal');
+    if (!m) return;
+
+    if (!_mirror || !_mirror.kupu || !_mirror.kupu.length) {
+      m.innerHTML = `
+        <div style="color:#fff;text-align:center;max-width:360px">
+          <div style="font-size:15px;font-weight:700;margin-bottom:8px">Child's screen</div>
+          <div style="font-size:13px;opacity:.8">Waiting for the child's board…<br>
+            (it appears once a list is synced and the device is showing the grid)</div>
+          <button id="ktt-mirror-close" style="margin-top:18px;padding:8px 18px;border:none;
+            border-radius:8px;background:#fff;color:#222;font-weight:600;cursor:pointer">Close</button>
+        </div>`;
+      m.querySelector('#ktt-mirror-close').onclick = closeMirror;
+      return;
+    }
+
+    const cols = _mirror.columns || 5;
+    const armed = _mirror.armed;
+    const tapped = _mirror.tapped;
+    const base = location.href.replace(/\/[^/]*$/, '/');
+    const showLabels = _mirror.showLabels !== false;
+
+    const cells = _mirror.kupu.map(kupu => {
+      const isTapped = (kupu === tapped);
+      const border = isTapped ? '#f0a500' : '#cdd6e0';
+      const bg = isTapped ? '#fff8e6' : '#fff';
+      const lbl = showLabels
+        ? `<div style="font-size:clamp(9px,1.6vw,13px);font-weight:700;color:#333;text-align:center">${kupu}</div>`
+        : '';
+      return `<div style="background:${bg};border:3px solid ${border};border-radius:12px;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        padding:6px;gap:4px;aspect-ratio:1;overflow:hidden">
+        <img src="${base}Images/${encodeURIComponent(kupu)}.png" alt="${kupu}"
+          style="width:100%;flex:1;object-fit:contain;min-height:0"
+          onerror="this.style.visibility='hidden'">
+        ${lbl}
+      </div>`;
+    }).join('');
+
+    const statusText = tapped
+      ? `Child tapped: <strong style="color:#f0a500">${tapped}</strong>`
+      : armed ? 'Board armed — waiting for the child to tap'
+      : 'Board shown — not yet armed';
+
+    m.innerHTML = `
+      <div style="width:100%;max-width:760px;display:flex;flex-direction:column;max-height:100%">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    color:#fff;margin-bottom:10px">
+          <div>
+            <div style="font-size:15px;font-weight:700">Child's screen (live, read-only)</div>
+            <div style="font-size:12px;opacity:.85;margin-top:2px">${statusText}
+              · ${_mirror.orientation || ''} · ${cols} columns</div>
+          </div>
+          <button id="ktt-mirror-close" style="padding:7px 16px;border:none;border-radius:8px;
+            background:#fff;color:#222;font-weight:600;cursor:pointer">Close</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:8px;
+                    overflow:auto;padding:4px;background:#f0f4f8;border-radius:12px">
+          ${cells}
+        </div>
+        <div style="color:#fff;opacity:.6;font-size:11px;text-align:center;margin-top:8px">
+          This is a view only — tapping here does not score. Score from the test screen.</div>
+      </div>`;
+    m.querySelector('#ktt-mirror-close').onclick = closeMirror;
   }
 
   // ─── Backgrounding detection ──────────────────────────────────────────────
@@ -880,17 +986,17 @@
         kttWarn('🎵', 'AudioContext not yet unlocked — showing tap prompt');
         showRespAudioPrompt(() => {
           playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
-            .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; })
-            .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; });
+            .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; sendMirrorState(); })
+            .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; sendMirrorState(); });
         });
       } else {
         playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
-          .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; })
-          .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; });
+          .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; sendMirrorState(); })
+          .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; sendMirrorState(); });
       }
     } else {
       kttLog('🎵', 'Audio playing on controller — arming grid after 800ms');
-      setTimeout(() => { respArmed = true; }, 800);
+      setTimeout(() => { respArmed = true; sendMirrorState(); }, 800);
     }
   }
 
@@ -905,12 +1011,12 @@
       cell.classList.add('resp-done');
       setTimeout(() => {
         cell.classList.remove('resp-done');
-        respConfirmed = false; respTapped = null; respArmed = true;
+        respConfirmed = false; respTapped = null; respArmed = true; sendMirrorState();
         kttLog('📝', 'Confirm done — grid re-armed');
       }, 600);
     } else {
       kttWarn('📝', 'No cell found for confirm kupu:', p.kupu || respTapped);
-      respConfirmed = false; respTapped = null; respArmed = true;
+      respConfirmed = false; respTapped = null; respArmed = true; sendMirrorState();
     }
   }
 
@@ -961,6 +1067,16 @@
     view.style.display = 'flex';
     view.className = 'resp-view';
     renderResponderGrid();
+
+    // Re-report layout to the clinician's mirror when the device rotates.
+    if (!window._kttOrientationHooked) {
+      window._kttOrientationHooked = true;
+      const reportRotate = () => { if (respKupu.length) sendMirrorState(); };
+      window.addEventListener('orientationchange', () => setTimeout(reportRotate, 250));
+      try {
+        window.matchMedia('(orientation: portrait)').addEventListener('change', reportRotate);
+      } catch (_) {}
+    }
   }
 
   function renderResponderGrid() {
@@ -1025,6 +1141,34 @@
 
     // Always show "Tap here to commence"
     showCommenceOverlay();
+
+    // Report fresh board layout to the clinician's mirror.
+    sendMirrorState();
+  }
+
+  // ─── Mirror (clinician sees the child's board, #2) ────────────────────────
+  // The responder reports its board layout + live state so the controller can
+  // render a read-only replica ("the one below that" works because columns match).
+  function currentRespColumns() {
+    // Mirror the CSS: 3 columns in portrait, 5 in landscape.
+    try {
+      return window.matchMedia('(orientation: portrait)').matches ? 3 : 5;
+    } catch (_) { return 5; }
+  }
+
+  function sendMirrorState() {
+    if (!pairSecure) return;
+    try {
+      pairEl.send('ktt-mirror', {
+        kupu: respKupu,
+        columns: currentRespColumns(),
+        orientation: currentRespColumns() === 3 ? 'portrait' : 'landscape',
+        armed: respArmed,
+        tapped: respTapped,
+        showLabels: respShowLabels,
+        ts: Date.now(),
+      });
+    } catch (_) {}
   }
 
   function addResponderDebugGesture(view) {
@@ -1110,6 +1254,7 @@
     if (pairSecure) {
       kttLog('👆', 'Sending ktt-response:', kupu);
       pairEl.send('ktt-response', { kupu, ts: Date.now() });
+      sendMirrorState();
     } else {
       kttWarn('👆', 'Not connected — response not sent');
     }
