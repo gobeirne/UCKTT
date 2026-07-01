@@ -64,16 +64,20 @@
   let _audioCtx    = null;
 
   function unlockAudio() {
-    if (_audioCtx) return;
     try {
-      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (!_audioCtx) {
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      // Play a silent buffer to satisfy the iOS gesture requirement.
       const buf = _audioCtx.createBuffer(1, 1, 22050);
       const src = _audioCtx.createBufferSource();
       src.buffer = buf;
       src.connect(_audioCtx.destination);
       src.start(0);
+      // Always try to resume — after a lock/background the context is SUSPENDED
+      // but non-null, so an early return here would leave audio dead.
       if (_audioCtx.state === 'suspended') _audioCtx.resume();
-      kttLog('🔊', 'AudioContext unlocked, state:', _audioCtx.state);
+      kttLog('🔊', 'AudioContext unlocked/resumed, state:', _audioCtx.state);
     } catch (e) {
       kttWarn('🔊', 'AudioContext unlock failed:', e.message);
     }
@@ -88,7 +92,12 @@
         a.onended = resolve;
         return;
       }
-      fetch(url)
+      // If the context was suspended (e.g. after lock/background), resume it
+      // first — otherwise decode/start silently no-ops on iOS.
+      const ensureRunning = _audioCtx.state === 'suspended'
+        ? _audioCtx.resume().catch(() => {})
+        : Promise.resolve();
+      ensureRunning.then(() => fetch(url))
         .then(r => r.arrayBuffer())
         .then(buf => _audioCtx.decodeAudioData(buf))
         .then(decoded => {
@@ -827,6 +836,14 @@
       _selfBackgrounded = document.visibilityState === 'hidden';
       kttLog(_selfBackgrounded ? '🌙' : '☀️',
         'This device', _selfBackgrounded ? 'hidden' : 'visible');
+      // On returning to the foreground, iOS leaves the AudioContext SUSPENDED.
+      // Resume it now so the next sound actually plays (fixes silent audio after
+      // a lock/background cycle on the child device).
+      if (!_selfBackgrounded && _audioCtx && _audioCtx.state === 'suspended') {
+        _audioCtx.resume()
+          .then(() => kttLog('🔊', 'AudioContext resumed on foreground'))
+          .catch(e => kttWarn('🔊', 'Resume on foreground failed:', e.message));
+      }
       // Tell the peer BEFORE we may get frozen (send is best-effort).
       reportBackground(_selfBackgrounded);
       updateStatusBadge();
@@ -982,9 +999,13 @@
       const carrierURL = CARRIER_URL;
       const kupuURL    = `${AUDIO_DIR}/${encodeURIComponent(p.kupu)}.mp3`;
       kttLog('🎵', 'Playing audio on responder | audioCtx:', _audioCtx?.state || 'none');
-      if (!_audioCtx) {
-        kttWarn('🎵', 'AudioContext not yet unlocked — showing tap prompt');
+      // Missing context OR a suspended one (post lock/background) both need a
+      // user gesture on iOS. Show the tap prompt so the child re-arms audio.
+      const needsGesture = !_audioCtx || _audioCtx.state === 'suspended';
+      if (needsGesture) {
+        kttWarn('🎵', 'AudioContext not ready (state:', _audioCtx?.state || 'none', ') — showing tap prompt');
         showRespAudioPrompt(() => {
+          unlockAudio();  // resumes/creates the context inside the gesture
           playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
             .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; sendMirrorState(); })
             .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; sendMirrorState(); });
