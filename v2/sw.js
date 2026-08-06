@@ -10,7 +10,7 @@
  * cache on activate. Bump APP_VERSION on every deploy (or let your build stamp it).
  */
 
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2.0';
 const CACHE_NAME  = `ktt-v${APP_VERSION}`;
 
 // App shell — must-have files, including the formerly RapidPair-owned libs so a
@@ -125,13 +125,25 @@ self.addEventListener('message', (event) => {
 });
 
 // --- Strategies ---
+// Range requests (audio/video seeking) return 206 Partial Content, which the
+// Cache API refuses to store. `net.ok` is true for 206, so it must be excluded
+// explicitly or every media request throws an uncaught rejection.
+function cacheable(res) {
+  return res && res.ok && res.status !== 206 && res.type !== 'opaque';
+}
+
+function putSafe(cache, req, res) {
+  if (!cacheable(res)) return;
+  cache.put(req, res.clone()).catch(err => console.warn('SW: cache put failed', req.url, err));
+}
+
 async function cacheFirst(req) {
   const cache = await caches.open(CACHE_NAME);
   const cached = await cache.match(req);
   if (cached) return cached;
   try {
     const net = await fetch(req);
-    if (net && net.ok) cache.put(req, net.clone());
+    putSafe(cache, req, net);
     return net;
   } catch { return cached || Response.error(); }
 }
@@ -141,7 +153,7 @@ async function networkFirst(req) {
   try {
     // cache:'no-store' on the network leg defeats the GitHub Pages edge cache.
     const net = await fetch(req, { cache: 'no-store' });
-    if (net && net.ok) cache.put(req, net.clone());
+    putSafe(cache, req, net);
     return net;
   } catch {
     const cached = await cache.match(req) || await cache.match('./index.html');

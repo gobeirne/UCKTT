@@ -62,9 +62,19 @@
   let respCarrier  = null;
   let respKupuAud  = null;
   let _audioCtx    = null;
+  let _mediaPrimed = false;
+  let _respSource  = null;      // active Web Audio buffer source, so it can be stopped
+  const MAX_CLIP_MS = 6000;     // watchdog ceiling for a single clip
 
   function unlockAudio() {
     try {
+      // iOS 16.4+: without this, an AudioContext runs in the "ambient" session
+      // category — silenced by the Ring/Silent switch, and volume buttons adjust
+      // the RINGER, not media. 'playback' gives us a proper media session.
+      try {
+        if (navigator.audioSession) navigator.audioSession.type = 'playback';
+      } catch (_) {}
+
       if (!_audioCtx) {
         _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       }
@@ -81,11 +91,78 @@
     } catch (e) {
       kttWarn('🔊', 'AudioContext unlock failed:', e.message);
     }
+    // Media elements are unlocked separately from the AudioContext, and unlike
+    // Web Audio they are NOT silenced by the hardware mute switch — so they are
+    // the primary playback path on iOS.
+    primeMediaAudio();
+  }
+
+  // ─── Responder playback ───────────────────────────────────────────────────
+  // Two paths, in order of preference:
+  //   1. HTMLAudioElement — ignores the iOS Ring/Silent switch, no decode step.
+  //   2. Web Audio        — fallback if a media element won't play.
+  // Both are wrapped so a stalled play can never leave the child's grid unarmed.
+
+  function primeMediaAudio() {
+    try {
+      if (!respCarrier) {
+        respCarrier = new Audio(); respCarrier.preload = 'auto'; respCarrier.src = CARRIER_URL;
+      }
+      if (!respKupuAud) {
+        respKupuAud = new Audio(); respKupuAud.preload = 'auto'; respKupuAud.src = CARRIER_URL;
+      }
+      // Silent play/pause inside the gesture is what unlocks each element.
+      [respCarrier, respKupuAud].forEach(a => {
+        a.muted = true;
+        const p = a.play();
+        const settle = () => { try { a.pause(); a.currentTime = 0; } catch (_) {} a.muted = false; };
+        if (p && p.then) p.then(settle).catch(() => { a.muted = false; });
+        else settle();
+      });
+      if (!_mediaPrimed) kttLog('🔊', 'Media elements primed for playback');
+      _mediaPrimed = true;
+    } catch (e) {
+      kttWarn('🔊', 'Media prime failed:', e.message);
+    }
+  }
+
+  // Play a URL through a primed media element. Resolves on ended, on error, or
+  // on a duration-based watchdog — never hangs.
+  function playMediaEl(a, url) {
+    return new Promise(resolve => {
+      if (!a) return resolve(false);
+      let settled = false;
+      let watchdog = null;
+      const done = ok => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        a.onended = a.onerror = null;
+        resolve(ok);
+      };
+      try {
+        a.onended = () => done(true);
+        a.onerror = () => { kttWarn('🎵', 'Media element error for', url); done(false); };
+        if (!a.src.endsWith(url)) a.src = url;
+        a.currentTime = 0;
+        // Hard ceiling in case 'ended' never arrives (interrupted session, etc).
+        watchdog = setTimeout(() => {
+          kttWarn('🎵', 'Media watchdog fired for', url, '— treating as complete');
+          done(true);
+        }, MAX_CLIP_MS);
+        const p = a.play();
+        if (p && p.catch) p.catch(err => { kttWarn('🎵', 'Media play rejected:', err.message); done(false); });
+      } catch (e) {
+        kttWarn('🎵', 'Media play threw:', e.message);
+        done(false);
+      }
+    });
   }
 
   function playAudioIOS(url) {
     return new Promise((resolve, reject) => {
-      kttLog('🎵', 'playAudioIOS:', url, '| ctx:', _audioCtx?.state || 'none');
+      kttLog('🎵', 'playAudioIOS:', url, '| ctx:', _audioCtx?.state || 'none',
+             '| clock:', _audioCtx ? _audioCtx.currentTime.toFixed(2) : '—');
       if (!_audioCtx) {
         const a = new Audio(url);
         a.play().catch(reject);
@@ -104,11 +181,34 @@
           const src = _audioCtx.createBufferSource();
           src.buffer = decoded;
           src.connect(_audioCtx.destination);
-          src.onended = resolve;
+          _respSource = src;
+          // iOS can report state 'running' while the audio session is actually
+          // interrupted: the clock freezes and 'onended' never fires. Guard with
+          // a timer set from the real clip duration.
+          let settled = false;
+          const finish = () => { if (!settled) { settled = true; resolve(); } };
+          src.onended = finish;
+          setTimeout(finish, decoded.duration * 1000 + 400);
           src.start(0);
         })
         .catch(err => { kttWarn('🎵', 'playAudioIOS error:', err.message); reject(err); });
     });
+  }
+
+  // Carrier phrase then kupu. Always resolves so the caller can arm the grid.
+  async function playPresentation(carrierURL, kupuURL) {
+    if (_mediaPrimed && respCarrier && respKupuAud) {
+      const okCarrier = await playMediaEl(respCarrier, carrierURL);
+      const okKupu    = await playMediaEl(respKupuAud, kupuURL);
+      if (okCarrier || okKupu) return;
+      kttWarn('🎵', 'Media path failed both clips — falling back to Web Audio');
+    }
+    try {
+      await playAudioIOS(carrierURL);
+      await playAudioIOS(kupuURL);
+    } catch (e) {
+      kttWarn('🎵', 'Web Audio path failed:', e.message);
+    }
   }
 
   // ─── Public API (called from manualTest.js) ───────────────────────────────
@@ -998,22 +1098,33 @@
       stopRespAudio();
       const carrierURL = CARRIER_URL;
       const kupuURL    = `${AUDIO_DIR}/${encodeURIComponent(p.kupu)}.mp3`;
-      kttLog('🎵', 'Playing audio on responder | audioCtx:', _audioCtx?.state || 'none');
-      // Missing context OR a suspended one (post lock/background) both need a
-      // user gesture on iOS. Show the tap prompt so the child re-arms audio.
-      const needsGesture = !_audioCtx || _audioCtx.state === 'suspended';
+      kttLog('🎵', 'Playing audio on responder | audioCtx:', _audioCtx?.state || 'none',
+             '| media primed:', _mediaPrimed);
+
+      // Arm the grid exactly once, however the audio ends — a stalled clip must
+      // never leave the child unable to respond.
+      let armed = false;
+      const armNow = why => {
+        if (armed) return;
+        armed = true;
+        clearTimeout(armWatchdog);
+        kttLog('🎵', `Arming grid (${why})`);
+        respArmed = true; sendMirrorState();
+      };
+      const armWatchdog = setTimeout(() => armNow('watchdog — audio never completed'),
+                                     MAX_CLIP_MS * 2 + 1000);
+
+      // A missing context, a suspended one, and unprimed media elements all need
+      // a user gesture on iOS. Show the tap prompt so the child re-enables audio.
+      const needsGesture = !_mediaPrimed && (!_audioCtx || _audioCtx.state === 'suspended');
       if (needsGesture) {
-        kttWarn('🎵', 'AudioContext not ready (state:', _audioCtx?.state || 'none', ') — showing tap prompt');
+        kttWarn('🎵', 'Audio not ready (ctx:', _audioCtx?.state || 'none', ') — showing tap prompt');
         showRespAudioPrompt(() => {
-          unlockAudio();  // resumes/creates the context inside the gesture
-          playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
-            .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; sendMirrorState(); })
-            .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; sendMirrorState(); });
+          unlockAudio();  // resumes the context and primes media inside the gesture
+          playPresentation(carrierURL, kupuURL).then(() => armNow('audio complete'));
         });
       } else {
-        playAudioIOS(carrierURL).then(() => playAudioIOS(kupuURL))
-          .then(() => { kttLog('🎵', 'Audio complete, arming grid'); respArmed = true; sendMirrorState(); })
-          .catch(e => { kttWarn('🎵', 'Audio error:', e.message); respArmed = true; sendMirrorState(); });
+        playPresentation(carrierURL, kupuURL).then(() => armNow('audio complete'));
       }
     } else {
       kttLog('🎵', 'Audio playing on controller — arming grid after 800ms');
@@ -1066,7 +1177,10 @@
   }
 
   function stopRespAudio() {
-    [respCarrier, respKupuAud].forEach(a => { if (a) { a.pause(); a.currentTime = 0; } });
+    [respCarrier, respKupuAud].forEach(a => {
+      if (a) { try { a.pause(); a.currentTime = 0; } catch (_) {} }
+    });
+    if (_respSource) { try { _respSource.stop(0); } catch (_) {} _respSource = null; }
   }
 
   // ─── RESPONDER — full-screen grid UI ─────────────────────────────────────
