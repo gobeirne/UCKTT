@@ -392,6 +392,13 @@
       this._hbDeadSince  = 0;      // ts we entered dead/recovery (0 = not dead)
       this._hbRecoverMs  = 30000;  // keep nursing a dead link this long before teardown
       this._pairMethod   = null;   // 'lan' (QR/offline) | 'stun' | 'turn'
+      // Reconnect storm guard: prevents the disconnect→re-pair→fail→disconnect
+      // loop from running away (as seen when a peer powers off mid-session).
+      this._reconnecting   = false;
+      this._reconnectTries = 0;
+      this._reconnectTimer = null;
+      this._reconnectMax   = 5;     // give up auto-retry after this many
+      this._reconnectBaseMs = 2000; // exponential backoff base
     }
 
     connectedCallback() {
@@ -911,20 +918,24 @@
      * force a token refresh and, if that fails, re-sign-in anonymously.
      */
     async _ensureFreshAuth() {
+      await this._ensureFirebase();
+      const user = this._fb.auth && this._fb.auth.currentUser;
+      // No session at all → must sign in; let this throw if it genuinely fails.
+      if (!user) {
+        this._log('No auth user — signing in anonymously');
+        await this._fb.signInAnonymously(this._fb.auth);
+        return;
+      }
+      // We already have a session. Try to FRESHEN the token, but treat failure
+      // as non-fatal: the existing token is usually still valid, and the token
+      // refresh endpoint may be blocked (403) by API-key restrictions. Throwing
+      // here previously cascaded into an infinite re-pair loop, so we don't.
       try {
-        await this._ensureFirebase();
-        const user = this._fb.auth && this._fb.auth.currentUser;
-        if (!user) {
-          this._log('No auth user — re-signing in');
-          await this._fb.signInAnonymously(this._fb.auth);
-          return;
-        }
-        // Force-refresh the ID token; throws if the session is truly dead.
         await user.getIdToken(true);
       } catch (err) {
-        this._log('Auth refresh failed, re-signing in:', err && err.message);
-        try { await this._fb.signInAnonymously(this._fb.auth); }
-        catch (e2) { this._log('Re-sign-in failed:', e2 && e2.message); throw e2; }
+        this._log('Token refresh failed (non-fatal), using existing session:', err && err.message);
+        // Best-effort cached token; if even this fails we still don't throw.
+        try { await user.getIdToken(false); } catch (_) {}
       }
     }
 
@@ -1092,6 +1103,7 @@
 
       // Link is now verified and usable — begin liveness monitoring.
       this._startHeartbeat();
+      this._resetReconnectGuard();
 
       // Auto-close modal
       if (this._autoClose) {
@@ -1117,16 +1129,54 @@
       this._setLinkState('idle', true);
       this._secureChan = null;
       this.dispatchEvent(new CustomEvent('disconnected', { detail: {} }));
-      // If we had a previous role, allow reconnect by reopening modal
-      if (this._lastRole) {
+
+      if (!this._lastRole) return;
+
+      // Responder just waits in the modal for the controller to re-establish.
+      if (this._lastRole !== 'controller') {
         this._showModal();
-        if (this._lastRole === 'controller') {
-          this._showStep('step2controller');
-          this._controllerGenerateCode();
-        } else {
-          this._showStep('step2responder');
-        }
+        this._showStep('step2responder');
+        return;
       }
+
+      // Controller auto-retries — but guarded so a peer that stays offline can't
+      // trigger an infinite disconnect→regenerate→fail loop.
+      if (this._reconnecting) return;            // already mid-attempt
+      if (this._reconnectTimer) return;          // backoff already scheduled
+
+      if (this._reconnectTries >= this._reconnectMax) {
+        this._log(`Reconnect: gave up after ${this._reconnectTries} attempts`);
+        this._showModal();
+        this._showStep('step2controller');
+        this._showStatus('#controllerStatus',
+          '⚠️ Could not reconnect automatically. Tap to retry or re-pair.', 'error');
+        this._reconnectTries = 0;                // allow manual retry to start fresh
+        return;
+      }
+
+      const delay = this._reconnectBaseMs * Math.pow(2, this._reconnectTries);
+      this._reconnectTries++;
+      this._log(`Reconnect: attempt ${this._reconnectTries}/${this._reconnectMax} in ${delay}ms`);
+      this._showModal();
+      this._showStep('step2controller');
+      this._reconnectTimer = setTimeout(async () => {
+        this._reconnectTimer = null;
+        this._reconnecting = true;
+        try {
+          await this._controllerGenerateCode();
+        } catch (err) {
+          this._log('Reconnect attempt threw:', err && err.message);
+        } finally {
+          this._reconnecting = false;
+        }
+      }, delay);
+    }
+
+    // Called on successful (re)connect to clear the storm guard.
+    _resetReconnectGuard() {
+      this._reconnectTries = 0;
+      this._reconnecting = false;
+      if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     }
 
     _resetInactivityTimer() {
@@ -1307,6 +1357,11 @@
         ]);
       }
 
+      // The PC may have been torn down concurrently (peer powered off); bail safely.
+      if (!this._pc || !this._pc.localDescription || !this._pc.localDescription.sdp) {
+        this._log('Code generation aborted — peer connection went away');
+        return;
+      }
       const minSDP = this._extractMinimalSDP(this._pc.localDescription.sdp, 'offer', true);
       const hostPacked = this._pack({ role: 'host', sdp: minSDP });
 

@@ -10,7 +10,7 @@
  * cache on activate. Bump APP_VERSION on every deploy (or let your build stamp it).
  */
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 const CACHE_NAME  = `ktt-v${APP_VERSION}`;
 
 // App shell — must-have files, including the formerly RapidPair-owned libs so a
