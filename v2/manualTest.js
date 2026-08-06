@@ -204,26 +204,43 @@
     }
   }
 
+  // Pip states, in click-cycle order:
+  //   empty (untested) → correct → incorrect → noresponse → empty
+  const PIP_ORDER = ['empty', 'correct', 'incorrect', 'noresponse'];
+
   function cyclePip(kupu, level, idx) {
     const pips = getPips(kupu, level);
     if (idx >= pips.length) return;
-    const cur = pips[idx];
-    pips[idx] = cur === 'empty' ? 'correct' : cur === 'correct' ? 'incorrect' : 'empty';
+    const i = PIP_ORDER.indexOf(pips[idx]);
+    pips[idx] = PIP_ORDER[(i + 1) % PIP_ORDER.length];
+    autosaveSession();
+  }
+
+  // Record "no response" for the armed kupu at the current level.
+  function markNoResponse() {
+    if (!armedKupu) return;
+    ensurePipSlot(armedKupu, currentLevel);
+    const pips = getPips(armedKupu, currentLevel);
+    const i = pips.indexOf('empty');
+    if (i >= 0) pips[i] = 'noresponse'; else pips.push('noresponse');
+    refreshScoringTable();
     autosaveSession();
   }
 
   function levelTally(level) {
     const list = getActiveList();
-    if (!list) return { nc: 0, ni: 0, total: 0 };
-    let nc = 0, ni = 0;
+    if (!list) return { nc: 0, ni: 0, nn: 0, total: 0 };
+    let nc = 0, ni = 0, nn = 0;
     for (const kupu of list.kupu) {
       const pips = getPips(kupu, level);
       for (const p of pips) {
-        if (p === 'correct') nc++;
-        if (p === 'incorrect') ni++;
+        if      (p === 'correct')    nc++;
+        else if (p === 'incorrect')  ni++;
+        else if (p === 'noresponse') nn++;
       }
     }
-    return { nc, ni, total: nc + ni };
+    // No-response counts in the denominator: the kupu was presented, not identified.
+    return { nc, ni, nn, total: nc + ni + nn };
   }
 
   // ─── Audio ────────────────────────────────────────────────────────────────
@@ -975,6 +992,10 @@
       cls: 'mt-btn', style: 'background:#ffebee;border-color:#e57373;color:#c62828;font-weight:700',
       onclick: () => { confirmPeerResponse(false); }
     }, '✗ Incorrect'));
+    confirmBar.appendChild(el('button', {
+      cls: 'mt-btn', style: 'background:#f5f5f5;border-color:#999;color:#444;font-weight:700',
+      onclick: () => { confirmPeerResponse('noresponse'); }
+    }, '⊘ No response'));
     root.appendChild(infoBar);
     root.appendChild(confirmBar);
 
@@ -1021,7 +1042,13 @@
     }, '▶ Play');
     if (!armedKupu) playBtn.disabled = true;
 
-    bar.append(minusBtn, levelDisp, plusBtn, manualWrap, spacer, armedLbl, playBtn);
+    const nrBtn = el('button', { cls: 'mt-btn mt-nr-btn', id: 'mt-nr-btn',
+      title: 'Record no response for the selected kupu at this level',
+      onclick: () => markNoResponse()
+    }, '⊘ No response');
+    if (!armedKupu) nrBtn.disabled = true;
+
+    bar.append(minusBtn, levelDisp, plusBtn, manualWrap, spacer, armedLbl, nrBtn, playBtn);
     return bar;
   }
 
@@ -1061,7 +1088,8 @@
     const tr = el('tr', {
       cls: (isArmed ? 'mt-row-armed' : '') + ' mt-row-clickable',
       'data-kupu': kupu,
-      onclick: () => armKupu(kupu)
+      // A hold ends in a click event — ignore it so the play doesn't also un-arm.
+      onclick: () => { if (Date.now() - holdFiredAt < 600) return; armKupu(kupu); }
     });
 
     // Kupu cell
@@ -1083,6 +1111,7 @@
       nameTd.appendChild(el('span', { cls: 'mt-kupu-name' + (isArmed ? ' armed' : '') }, kupu));
     }
     tr.appendChild(nameTd);
+    attachHoldToPlay(nameTd, kupu);   // hold the word or the picture to play it
 
     // Level cells — pip clicks stop propagation so they don't also fire armKupu
     levelsUsed.forEach(lv => {
@@ -1157,14 +1186,15 @@
 
     // Legend
     const leg = el('div', { cls: 'mt-legend' });
-    [['correct','correct'],['incorrect','incorrect'],['empty','untested']].forEach(([cls, lbl]) => {
-      const item = el('div', { cls: 'mt-leg-item' });
-      item.appendChild(el('div', { cls: `mt-leg-pip ${cls}` }));
-      item.appendChild(document.createTextNode(lbl));
-      leg.appendChild(item);
-    });
+    [['correct','correct'],['incorrect','incorrect'],['noresponse','no response'],['empty','untested']]
+      .forEach(([cls, lbl]) => {
+        const item = el('div', { cls: 'mt-leg-item' });
+        item.appendChild(el('div', { cls: `mt-leg-pip ${cls}` }));
+        item.appendChild(document.createTextNode(lbl));
+        leg.appendChild(item);
+      });
     leg.appendChild(el('span', { cls: 'mt-hint-text', style: 'margin-left:6px' },
-      'Play adds a slot · click pip to score'));
+      'Play adds a slot · click pip to cycle · hold a kupu to play it'));
     sb.appendChild(leg);
 
     return sb;
@@ -1173,11 +1203,12 @@
   function updateSidebarScore() {
     const grid = document.getElementById('mt-score-grid');
     if (!grid) return;
-    const { nc, ni, total } = levelTally(currentLevel);
+    const { nc, ni, nn, total } = levelTally(currentLevel);
     grid.innerHTML = `
       <div class="mt-score-tile"><div class="mt-score-v green-v" id="mt-nc">${nc}</div><div class="mt-score-l">correct</div></div>
       <div class="mt-score-tile"><div class="mt-score-v red-v" id="mt-ni">${ni}</div><div class="mt-score-l">incorrect</div></div>
-      <div class="mt-score-tile" style="grid-column:span 2">
+      <div class="mt-score-tile"><div class="mt-score-v grey-v" id="mt-nn">${nn}</div><div class="mt-score-l">no response</div></div>
+      <div class="mt-score-tile" style="grid-column:span 3">
         <div class="mt-score-v">${total > 0 ? Math.round(nc/total*100)+'%' : '—'}</div>
         <div class="mt-score-l">% correct at ${currentLevel} dBA</div>
       </div>`;
@@ -1227,8 +1258,13 @@
     if (label) { label.textContent = kupu; }
   }
 
-  function confirmPeerResponse(correct, targetKupu, keepBar) {
-    if (window.kttPaired) window.kttPaired.sendConfirm(correct);
+  // `result` may be true / false (legacy call sites) or a pip state string:
+  // 'correct' | 'incorrect' | 'noresponse'.
+  function confirmPeerResponse(result, targetKupu, keepBar) {
+    const state = result === true  ? 'correct'
+                : result === false ? 'incorrect'
+                : result;
+    if (window.kttPaired) window.kttPaired.sendConfirm(state === 'correct');
     const bar = document.getElementById('mt-confirm-bar');
     // Manual path hides immediately; auto path keeps the bar so it can fade.
     if (bar && !keepBar) {
@@ -1246,7 +1282,7 @@
       const pips = getPips(scoreKupu, currentLevel);
       const emptyIdx = pips.indexOf('empty');
       if (emptyIdx >= 0) {
-        pips[emptyIdx] = correct ? 'correct' : 'incorrect';
+        pips[emptyIdx] = state;
         refreshScoringTable();
         autosaveSession();
       }
@@ -1327,15 +1363,60 @@
     }
   }
 
-  function armKupu(kupu) {
-    armedKupu = armedKupu === kupu ? null : kupu;
+  // Set the armed kupu outright (no toggle) and sync the dependent UI.
+  function setArmedKupu(kupu) {
+    armedKupu = kupu;
     const armedLbl = document.getElementById('mt-armed-label');
     const carrier  = document.getElementById('mt-carrier-display');
     const playBtn  = document.getElementById('mt-play-btn');
+    const nrBtn    = document.getElementById('mt-nr-btn');
     if (armedLbl) armedLbl.textContent = armedKupu ? `"Kei hea te ${armedKupu}?"` : '— select a kupu —';
     if (carrier)  carrier.textContent  = armedKupu ? `"Kei hea te ${armedKupu}?"` : '"Kei hea te ___?"';
     if (playBtn)  playBtn.disabled     = !armedKupu;
+    if (nrBtn)    nrBtn.disabled       = !armedKupu;
     refreshScoringTable();
+  }
+
+  // Row click keeps the old toggle behaviour.
+  function armKupu(kupu) {
+    setArmedKupu(armedKupu === kupu ? null : kupu);
+  }
+
+  // ─── Hold-to-play ─────────────────────────────────────────────────────────
+  // Tap a kupu = select it (as before). Press and hold the word or the picture
+  // for HOLD_MS = select AND play, so there's no select-then-reach-for-Play step.
+  // Double-click does the same thing on a desktop mouse.
+
+  const HOLD_MS = 450;
+  // Module-level, because playKupu() re-renders the table and destroys the very
+  // node that is being held — a flag in the handler's closure would go with it.
+  let holdFiredAt = 0;
+
+  function firePlay(kupu) {
+    holdFiredAt = Date.now();
+    if (armedKupu !== kupu) setArmedKupu(kupu);
+    try { navigator.vibrate && navigator.vibrate(15); } catch (_) {}
+    playKupu(kupu);
+  }
+
+  function attachHoldToPlay(node, kupu) {
+    let timer = null;
+
+    const start = e => {
+      if (e.button !== undefined && e.button !== 0) return;   // ignore right/middle click
+      node.classList.add('mt-holding');
+      timer = setTimeout(() => {
+        node.classList.remove('mt-holding');
+        firePlay(kupu);
+      }, HOLD_MS);
+    };
+
+    const cancel = () => { clearTimeout(timer); node.classList.remove('mt-holding'); };
+
+    node.addEventListener('pointerdown', start);
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => node.addEventListener(ev, cancel));
+    node.addEventListener('contextmenu', e => e.preventDefault());   // no iOS callout on hold
+    node.addEventListener('dblclick', e => { e.stopPropagation(); firePlay(kupu); });
   }
 
   // ─── Image manager ────────────────────────────────────────────────────────
@@ -1370,7 +1451,7 @@
         .imgmgr-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;padding:14px 16px;overflow-y:auto;flex:1; }
         .imgmgr-cell { display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px;border:1px solid #e8e8e8;border-radius:8px;background:#fafafa; }
         .imgmgr-cell.has-override { border-color:#3a7de0;background:#f0f5ff; }
-        .imgmgr-cell img { width:80px;height:80px;object-fit:contain;border-radius:4px; }
+        .imgmgr-cell img { width:80px;height:80px;object-fit:contain;border-radius:4px;background:#fff; }
         .imgmgr-name { font-size:11px;font-weight:700;color:#333;text-align:center; }
         .imgmgr-badge { font-size:9px;color:#1a5fa5;background:#e8f0fc;border-radius:10px;padding:1px 6px; }
         .imgmgr-btn { font-size:11px;padding:3px 9px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;width:100%; }
@@ -1591,7 +1672,7 @@
           display: flex; flex-direction: column; align-items: center; justify-content: center;
           overflow: hidden;
         }
-        .cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; }
+        .cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; background: #fff; }
         .lbl { font-size: 9px; color: #bbb; margin-top: 2px; flex-shrink: 0; }
       </style></head><body>
       ${headerHTML}
@@ -1615,7 +1696,11 @@
           const pips = getPips(kupu, lv);
           const nc = pips.filter(p => p === 'correct').length;
           const ni = pips.filter(p => p === 'incorrect').length;
-          if (nc + ni > 0) byLevel[lv] = { correct: nc, incorrect: ni, total: nc+ni, pips: pips.slice() };
+          const nn = pips.filter(p => p === 'noresponse').length;
+          if (nc + ni + nn > 0) byLevel[lv] = {
+            correct: nc, incorrect: ni, no_response: nn,
+            total: nc + ni + nn, pips: pips.slice(),
+          };
         });
         if (Object.keys(byLevel).length) scoringGrid[kupu] = byLevel;
       });
@@ -1635,7 +1720,7 @@
     }
 
     return {
-      schema_version: 2,
+      schema_version: 3,   // 3 adds no_response counts / 'noresponse' pips
       exported_at:    now.toISOString(),
       client:         { ...sessionMeta },
       clinic:         clinicSettings,
@@ -1667,7 +1752,8 @@
       `Scoring mode:   ${SCORING_MODES[data.test.scoring_mode]?.label || data.test.scoring_mode}`,
       `Levels used:    ${data.test.levels_used.join(', ')} dBA`,
       '',
-      '─── Scores ───', '',
+      '─── Scores ───',
+      '(correct/presented — *n = n presentations with no response)', '',
     ];
 
     const lvls = data.test.levels_used;
@@ -1683,7 +1769,8 @@
           const c = row[lv];
           if (!c) return pad('—', 11);
           const pct = Math.round(c.correct / c.total * 100);
-          return pad(`${c.correct}/${c.total} (${pct}%)`, 11);
+          const nr  = c.no_response ? `*${c.no_response}` : '';   // * = no responses
+          return pad(`${c.correct}/${c.total} (${pct}%)${nr}`, 11);
         });
         lines.push(pad(kupu, 14) + cells.join(''));
       });
@@ -1772,19 +1859,28 @@
     // ── Score table rows ──────────────────────────────────────────────────
     function pipDots(pips) {
       return (pips || []).map(p => {
-        const col = p === 'correct' ? '#2d8a1a' : p === 'incorrect' ? '#c0392b' : '#ddd';
-        return `<span style="display:inline-block;width:11px;height:11px;border-radius:3px;background:${col};margin:0 1px;vertical-align:middle"></span>`;
+        // No response prints as a white square with a grey slash, so it stays
+        // legible in greyscale and can't be mistaken for correct/incorrect.
+        const fill =
+          p === 'correct'    ? 'background:#2d8a1a;border:1px solid #2d8a1a' :
+          p === 'incorrect'  ? 'background:#c0392b;border:1px solid #c0392b' :
+          p === 'noresponse' ? 'background:#fff;border:1px solid #777;background-image:linear-gradient(135deg,transparent 42%,#777 42%,#777 58%,transparent 58%)' :
+                               'background:#ddd;border:1px solid #ddd';
+        return `<span style="display:inline-block;width:11px;height:11px;border-radius:3px;${fill};margin:0 1px;vertical-align:middle;box-sizing:border-box"></span>`;
       }).join('');
     }
 
     function levelSummaryRow(lv) {
-      let nc = 0, ni = 0;
+      let nc = 0, ni = 0, nn = 0;
       kupu.forEach(k => {
         const s = data.scores[k]?.[lv];
-        if (s) { nc += s.correct; ni += s.incorrect; }
+        if (s) { nc += s.correct; ni += s.incorrect; nn += (s.no_response || 0); }
       });
-      const tot = nc + ni;
-      return tot ? `${nc}/${tot} (${Math.round(nc/tot*100)}%)` : '—';
+      const tot = nc + ni + nn;
+      if (!tot) return '—';
+      const nrNote = nn
+        ? `<br><span style="font-size:9px;font-weight:400;color:#888">${nn} no response</span>` : '';
+      return `${nc}/${tot} (${Math.round(nc/tot*100)}%)${nrNote}`;
     }
 
     const headerCols = lvls.map(lv =>
@@ -1900,6 +1996,7 @@ ${lvls.length ? `
   <strong style="color:#555;font-size:10px">Key:</strong>
   <span><span class="key-dot" style="background:#2d8a1a"></span> Correct</span>
   <span><span class="key-dot" style="background:#c0392b"></span> Incorrect</span>
+  <span><span class="key-dot" style="background:#fff;border:1px solid #777;box-sizing:border-box;background-image:linear-gradient(135deg,transparent 42%,#777 42%,#777 58%,transparent 58%)"></span> No response</span>
   <span><span class="key-dot" style="background:#ddd"></span> Not scored</span>
   <span style="margin-left:8px;color:#aaa">Each dot = one presentation</span>
 </div>` : '<div style="color:#aaa;font-style:italic;margin-bottom:16px">No responses recorded.</div>'}

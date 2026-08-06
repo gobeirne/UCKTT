@@ -302,16 +302,22 @@
   .mt-pip.correct   { background: #4a9e1a; border-color: #2d7010; }
   .mt-pip.incorrect { background: #d94040; border-color: #a02020; }
   .mt-pip.empty     { background: #f0f0f0; }
+  /* No response: white with a grey slash — reads differently from untested grey */
+  .mt-pip.noresponse {
+    background: #fff; border-color: #777;
+    background-image: linear-gradient(135deg, transparent 42%, #777 42%, #777 58%, transparent 58%);
+  }
 
   /* Sidebar */
   .mt-level-big  { font-size: 32px; font-weight: 700; line-height: 1; display: inline; }
   .mt-level-unit { font-size: 14px; color: #888; }
-  .mt-score-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  .mt-score-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
   .mt-score-tile { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 6px 8px; text-align: center; }
   .mt-score-v { font-size: 18px; font-weight: 700; line-height: 1.2; }
   .mt-score-l { font-size: 10px; color: #888; margin-top: 1px; }
   .green-v { color: #2d7010; }
   .red-v   { color: #a02020; }
+  .grey-v  { color: #666; }
   .mt-carrier { font-style: italic; color: #555; font-size: 12px; line-height: 1.5; }
   .mt-phrases { display: flex; flex-direction: column; gap: 4px; }
   .mt-phrase-row { display: flex; flex-direction: column; }
@@ -326,6 +332,26 @@
   .mt-leg-pip.correct   { background: #4a9e1a; border-color: #2d7010; }
   .mt-leg-pip.incorrect { background: #d94040; border-color: #a02020; }
   .mt-leg-pip.empty     { background: #f0f0f0; }
+  .mt-leg-pip.noresponse {
+    background: #fff; border-color: #777;
+    background-image: linear-gradient(135deg, transparent 42%, #777 42%, #777 58%, transparent 58%);
+  }
+
+  /* Images sit on white — transparent PNG margins must not reveal the card behind */
+  .thumb, .cell img, .mt-kupu-img, .imgmgr-cell img { background: #fff; }
+
+  /* Hold-to-play feedback on the kupu cell */
+  .mt-kupu-td { cursor: pointer; user-select: none; -webkit-touch-callout: none; }
+  .mt-kupu-td img { -webkit-user-drag: none; user-drag: none; }
+  .mt-kupu-td.mt-holding {
+    border-radius: 6px;
+    animation: mt-hold-sweep 450ms linear forwards;
+  }
+  @keyframes mt-hold-sweep {
+    from { box-shadow: inset 3px 0 0 0 rgba(26,95,165,.55); }
+    to   { box-shadow: inset 220px 0 0 0 rgba(26,95,165,.18); }
+  }
+  .mt-nr-btn { font-size: 13px !important; padding: 7px 12px !important; }
 
   @media (max-width: 700px) {
     #manualSetupView, #manualTestView {

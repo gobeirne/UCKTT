@@ -777,7 +777,7 @@
         display:flex;flex-direction:column;align-items:center;justify-content:center;
         padding:6px;gap:4px;aspect-ratio:1;overflow:hidden">
         <img src="${base}Images/${encodeURIComponent(kupu)}.png" alt="${kupu}"
-          style="width:100%;flex:1;object-fit:contain;min-height:0"
+          style="width:100%;flex:1;object-fit:contain;min-height:0;background:#fff"
           onerror="this.style.visibility='hidden'">
         ${lbl}
       </div>`;
@@ -1130,7 +1130,7 @@
 
       const img = document.createElement('img');
       img.alt = kupu;
-      img.style.background = '#f5f5f5'; // visible while loading
+      img.style.background = '#f5f5f5'; // grey placeholder while loading only
 
       // Try extensions in order using absolute URLs
       const exts = ['png','jpg','jpeg','webp'];
@@ -1140,7 +1140,8 @@
         img.src = `${base}Images/${encodeURIComponent(kupu)}.${exts[extIdx++]}`;
       }
       img.onerror = tryNext;
-      img.onload  = () => { img.style.visibility = ''; };
+      // Once loaded, go white — transparent PNG margins must not show grey.
+      img.onload  = () => { img.style.visibility = ''; img.style.background = '#fff'; };
       tryNext();
 
       const lbl = document.createElement('div');
@@ -1318,7 +1319,7 @@
         aspect-ratio: 1;
       }
       .resp-cell:active { transform: scale(.96); }
-      .resp-cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; border-radius: 6px; }
+      .resp-cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; border-radius: 6px; background: #fff; }
       .resp-lbl { font-size: clamp(10px, 2vw, 14px); font-weight: 700; color: #333; text-align: center; }
 
       /* States */
