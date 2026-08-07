@@ -49,6 +49,7 @@
   let activeListId  = null;
   let scoringMode   = 'free';
   let currentLevel  = DEFAULT_LEVEL;
+  let currentEar    = 'binaural';   // 'left' | 'right' | 'binaural' (incl. sound field)
   let armedKupu     = null;
   let labelMode     = 'both';   // 'off' | 'child' | 'clinician' | 'both'
   // Derived helpers — keep older boolean call sites working.
@@ -352,6 +353,7 @@
   }
 
   function stopAudio() {
+    window.kttCal.stopAll();
     [carrierAudio, kupuAudio].forEach(a => { if (a) { a.pause(); a.currentTime = 0; } });
   }
 
@@ -365,7 +367,7 @@
 
     // Tell responder (if paired)
     if (window.kttPaired?.isConnected()) {
-      window.kttPaired.sendPlay(kupu, currentLevel);
+      window.kttPaired.sendPlay(kupu, currentLevel, currentEar);
     }
 
     refreshScoringTable();
@@ -375,15 +377,12 @@
                            window.kttPaired.getAudioFromResponder();
 
     if (!responderPlays) {
-      carrierAudio = new Audio(CARRIER_URL);
-      kupuAudio    = new Audio(`${AUDIO_DIR}/${encodeURIComponent(kupu)}.mp3`);
-      carrierAudio.play().catch(() => {});
-      carrierAudio.onended = () => {
-        kupuAudio.play().catch(() => {});
-        kupuAudio.onended = () => {
-          if (btn) { btn.disabled = !armedKupu; btn.textContent = '▶ Play'; }
-        };
-      };
+      // Routed through the calibration module: gain set from this device's
+      // profile, ear routing applied, carrier then kupu at the same level.
+      window.kttCal.play('carrier', CARRIER_URL, { level: currentLevel, ear: currentEar })
+        .then(() => window.kttCal.play('kupu', `${AUDIO_DIR}/${encodeURIComponent(kupu)}.mp3`,
+                                       { level: currentLevel, ear: currentEar }))
+        .then(() => { if (btn) { btn.disabled = !armedKupu; btn.textContent = '▶ Play'; } });
     } else {
       if (btn) { btn.disabled = !armedKupu; btn.textContent = '▶ Play'; }
     }
@@ -734,6 +733,14 @@
       }, 'Forget'));
       card.appendChild(forgetRow);
     }
+    card.appendChild(el('button', { cls: 'mt-btn',
+      style: 'width:100%;margin-top:4px;color:#7a4a00;border-color:#e0c08a',
+      onclick: () => window.kttCalUI.open()
+    }, '🎚 Calibrate this device'));
+    const calProf = window.kttCal ? window.kttCal.profile() : null;
+    card.appendChild(el('div', {
+      style: 'font-size:10px;margin-top:3px;color:' + (calProf?.isCalibrated ? '#2d7010' : '#a02020')
+    }, window.kttCal ? window.kttCal.summary(calProf) : ''));
     return card;
   }
 
@@ -876,6 +883,7 @@
     currentLevel     = DEFAULT_LEVEL;
     const S = loadSettings();
     if (S.lastLevel) currentLevel = parseInt(S.lastLevel) || DEFAULT_LEVEL;
+    if (S.lastEar) currentEar = S.lastEar;
     if (S.labelMode) labelMode = S.labelMode;
     else if (S.showLabels !== undefined) labelMode = S.showLabels ? 'both' : 'off';
     if (S.autoAccept) autoAccept = S.autoAccept;
@@ -1021,16 +1029,40 @@
   function renderLevelBar() {
     const bar = el('div', { cls: 'mt-level-bar' });
 
+    const bounds = levelBounds();
+
     const minusBtn = el('button', { cls: 'mt-level-btn', onclick: () => adjustLevel(-LEVEL_STEP) }, '−5');
-    const levelDisp = el('div', { cls: 'mt-level-disp', id: 'mt-level-disp' }, `${currentLevel} dBA`);
+    const levelDisp = el('div', { cls: 'mt-level-disp', id: 'mt-level-disp' },
+      `${currentLevel} ${bounds.unit}`);
     const plusBtn  = el('button', { cls: 'mt-level-btn', onclick: () => adjustLevel(+LEVEL_STEP) }, '+5');
+    if (currentLevel <= bounds.min) minusBtn.disabled = true;
+    if (currentLevel >= bounds.max) plusBtn.disabled  = true;
 
     const manualWrap = el('div', { cls: 'mt-manual-wrap' });
     const manualInp  = el('input', { cls: 'mt-manual-level', id: 'mt-manual-level',
-      type: 'number', value: String(currentLevel), min: String(LEVEL_MIN), max: String(LEVEL_MAX), step: '1',
-      oninput: e => { const n = parseInt(e.target.value); if (!isNaN(n) && n >= LEVEL_MIN && n <= LEVEL_MAX) setLevel(n); }
+      type: 'number', value: String(currentLevel),
+      min: String(bounds.min), max: String(bounds.max), step: '1',
+      oninput: e => { const n = parseFloat(e.target.value); if (!isNaN(n)) setLevel(n); }
     });
-    manualWrap.append(manualInp, el('span', { cls: 'mt-hint-text' }, ' dBA'));
+    manualWrap.append(manualInp, el('span', { cls: 'mt-hint-text' }, ` ${bounds.unit}`));
+
+    // Ear routing. 'Binaural' covers sound-field presentation.
+    const earWrap = el('div', { cls: 'mt-ear-wrap' });
+    [['left','L'],['binaural','B'],['right','R']].forEach(([val, lbl]) => {
+      earWrap.appendChild(el('button', {
+        cls: 'mt-ear-btn' + (currentEar === val ? ' on' : ''),
+        title: val === 'binaural' ? 'Binaural / sound field' : `${val} ear only`,
+        onclick: () => { currentEar = val; saveSettings({ lastEar: val }); renderTestScreen(); }
+      }, lbl));
+    });
+
+    // Calibration state of the device that will actually produce the sound.
+    const calBadge = el('div', {
+      cls: 'mt-cal-badge' + (bounds.calibrated ? ' calibrated' : ''),
+      title: bounds.calibrated
+        ? `Calibrated: max ${bounds.max} dB A on ${activeDeviceName()}. Device volume must be at maximum.`
+        : `${activeDeviceName()} is NOT calibrated — the level control is a dB FS attenuator, not dB A.`
+    }, bounds.calibrated ? `Calibrated · ${activeDeviceName()}` : `UNCALIBRATED · ${activeDeviceName()}`);
 
     const spacer = el('div', { style: 'flex:1' });
 
@@ -1048,7 +1080,7 @@
     }, '⊘ No response');
     if (!armedKupu) nrBtn.disabled = true;
 
-    bar.append(minusBtn, levelDisp, plusBtn, manualWrap, spacer, armedLbl, nrBtn, playBtn);
+    bar.append(minusBtn, levelDisp, plusBtn, manualWrap, earWrap, calBadge, spacer, armedLbl, nrBtn, playBtn);
     return bar;
   }
 
@@ -1216,17 +1248,56 @@
 
   // ─── Level control ────────────────────────────────────────────────────────
 
+  // The level control belongs to whichever device is actually producing sound,
+  // so its bounds and its unit come from that device's calibration profile.
+  function activeCalProfile() {
+    const responderPlays = window.kttPaired?.isConnected() &&
+                           window.kttPaired.getAudioFromResponder();
+    if (responderPlays) return window.kttPaired.getResponderCal();
+    return window.kttCal ? window.kttCal.profile() : null;
+  }
+
+  function activeDeviceName() {
+    const responderPlays = window.kttPaired?.isConnected() &&
+                           window.kttPaired.getAudioFromResponder();
+    return responderPlays ? 'responder' : 'this device';
+  }
+
+  function levelBounds() {
+    const c = activeCalProfile();
+    // Uncalibrated (or no profile yet from the responder): a dB FS attenuator,
+    // unity at 0 — never a fabricated dB(A) figure.
+    if (!c || !c.isCalibrated) return { min: -60, max: 0, unit: 'dB FS', calibrated: false };
+    return { min: c.minLevel, max: c.maxLevel, unit: 'dB A', calibrated: true };
+  }
+
+  function clampLevel(n) {
+    const b = levelBounds();
+    if (!isFinite(n)) return b.max;
+    if (Math.abs(n - b.max) <= 0.25) return b.max;   // exact max stays reachable
+    return Math.min(b.max, Math.max(b.min, Math.round(n / LEVEL_STEP) * LEVEL_STEP));
+  }
+
+  // Called when the responder reports its calibration, or when the audio source
+  // is switched — the dial may need to move into the new device's range.
+  function onResponderCal() {
+    setLevel(clampLevel(currentLevel));
+    renderTestScreen();
+  }
+
   function adjustLevel(delta) {
-    setLevel(Math.min(LEVEL_MAX, Math.max(LEVEL_MIN, currentLevel + delta)));
+    setLevel(clampLevel(currentLevel + delta));
   }
 
   function setLevel(n) {
+    n = clampLevel(n);
     currentLevel = n;
     saveSettings({ lastLevel: n });
     const disp   = document.getElementById('mt-level-disp');
     const big    = document.getElementById('mt-level-big');
     const manual = document.getElementById('mt-manual-level');
-    if (disp)   disp.textContent   = `${n} dBA`;
+    const b = levelBounds();
+    if (disp)   disp.textContent   = `${n} ${b.unit}`;
     if (big)    big.textContent    = String(n);
     if (manual) manual.value       = String(n);
     refreshScoringTable();
@@ -2090,7 +2161,7 @@ ${lvls.length ? `
   document.addEventListener('DOMContentLoaded', init);
 
   window.kttManual = { rebuildAllLists, renderSetupScreen, showView,
-    onPairResponse, onPairReady, onPairResponderWaiting,
+    onPairResponse, onPairReady, onPairResponderWaiting, onResponderCal,
     getActiveListForPair, getShowLabels: () => childLabelsOn(),
     isTestActive: () => {
       const v = document.getElementById('manualTestView');

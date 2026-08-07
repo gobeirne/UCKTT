@@ -48,6 +48,7 @@
   let pairRole     = null;
   let pairSecure   = false;
   let audioFromResponder = false;
+  let responderCal       = null;   // responder's calibration profile, received on pairing
   let pendingResponse = null;
   let responderReady  = false;
   let respShowLabels  = true;   // mirrors clinician's showLabels setting
@@ -95,6 +96,7 @@
     // Web Audio they are NOT silenced by the hardware mute switch — so they are
     // the primary playback path on iOS.
     primeMediaAudio();
+    if (window.kttCal) window.kttCal.prime();
   }
 
   // ─── Responder playback ───────────────────────────────────────────────────
@@ -196,7 +198,14 @@
   }
 
   // Carrier phrase then kupu. Always resolves so the caller can arm the grid.
-  async function playPresentation(carrierURL, kupuURL) {
+  async function playPresentation(carrierURL, kupuURL, level, ear) {
+    // Preferred path: routed through calibration.js so this device's own
+    // profile sets the gain and the requested ear is honoured.
+    if (window.kttCal) {
+      await window.kttCal.play('carrier', carrierURL, { level, ear });
+      await window.kttCal.play('kupu',    kupuURL,    { level, ear });
+      return;
+    }
     if (_mediaPrimed && respCarrier && respKupuAud) {
       const okCarrier = await playMediaEl(respCarrier, carrierURL);
       const okKupu    = await playMediaEl(respKupuAud, kupuURL);
@@ -219,6 +228,8 @@
     isConnected:          () => pairSecure,
     getRole:              () => pairRole,
     getAudioFromResponder:() => audioFromResponder,
+    getResponderCal:      () => responderCal,
+    sendCal,
     sendPlay,
     sendSync,
     sendDisplay,
@@ -478,6 +489,7 @@
     pairEl.on('ktt-mirror-req',  () => sendMirrorState());
     pairEl.on('ktt-image-chunk', onKttImageChunk);
     pairEl.on('ktt-play',        onKttPlay);
+    pairEl.on('ktt-cal',         onKttCal);
     pairEl.on('ktt-confirm',     onKttConfirm);
     pairEl.on('ktt-list-reset',  onKttListReset);
     pairEl.on('ktt-list-update', onKttSync);
@@ -1007,10 +1019,10 @@
     });
   }
 
-  function sendPlay(kupu, level) {
+  function sendPlay(kupu, level, ear) {
     if (!pairSecure || pairRole !== 'controller') return;
-    kttLog('▶', `sendPlay: ${kupu} @ ${level} dBA | playAudio on responder: ${audioFromResponder}`);
-    pairEl.send('ktt-play', { kupu, level, playAudio: audioFromResponder });
+    kttLog('▶', `sendPlay: ${kupu} @ ${level} ${responderCal?.isCalibrated ? 'dBA' : 'dBFS'} | ear: ${ear || 'binaural'} | playAudio on responder: ${audioFromResponder}`);
+    pairEl.send('ktt-play', { kupu, level, ear: ear || 'binaural', playAudio: audioFromResponder });
     pendingResponse = null;
   }
 
@@ -1087,6 +1099,28 @@
     }
   }
 
+  // ─── Calibration exchange ─────────────────────────────────────────────────
+  // The responder tells the controller how it is calibrated, so the level
+  // control can be bounded by whichever device is actually producing sound.
+
+  function sendCal() {
+    if (!pairSecure || pairRole !== 'responder') return;
+    const prof = window.kttCal ? window.kttCal.profile() : null;
+    if (!prof) return;
+    kttLog('🎚', 'Sending calibration profile:', window.kttCal.summary(prof));
+    pairEl.send('ktt-cal', prof);
+  }
+
+  function onKttCal(p) {
+    if (pairRole !== 'controller') return;
+    responderCal = p || null;
+    kttLog('🎚', 'Received responder calibration:',
+           window.kttCal ? window.kttCal.summary(p) : JSON.stringify(p));
+    if (typeof window.kttManual?.onResponderCal === 'function') {
+      window.kttManual.onResponderCal(responderCal);
+    }
+  }
+
   function onKttPlay(p) {
     if (pairRole !== 'responder') return;
     kttLog('▶', `Received ktt-play: ${p.kupu} @ ${p.level} dBA | playAudio: ${p.playAudio}`);
@@ -1121,10 +1155,10 @@
         kttWarn('🎵', 'Audio not ready (ctx:', _audioCtx?.state || 'none', ') — showing tap prompt');
         showRespAudioPrompt(() => {
           unlockAudio();  // resumes the context and primes media inside the gesture
-          playPresentation(carrierURL, kupuURL).then(() => armNow('audio complete'));
+          playPresentation(carrierURL, kupuURL, p.level, p.ear).then(() => armNow('audio complete'));
         });
       } else {
-        playPresentation(carrierURL, kupuURL).then(() => armNow('audio complete'));
+        playPresentation(carrierURL, kupuURL, p.level, p.ear).then(() => armNow('audio complete'));
       }
     } else {
       kttLog('🎵', 'Audio playing on controller — arming grid after 800ms');
@@ -1177,6 +1211,7 @@
   }
 
   function stopRespAudio() {
+    if (window.kttCal) window.kttCal.stopAll();
     [respCarrier, respKupuAud].forEach(a => {
       if (a) { try { a.pause(); a.currentTime = 0; } catch (_) {} }
     });
@@ -1373,7 +1408,7 @@
       unlockAudio();
       overlay.remove();
       // Tell controller the responder is ready
-      if (pairSecure) pairEl.send('ktt-ready', { ts: Date.now() });
+      if (pairSecure) { pairEl.send('ktt-ready', { ts: Date.now() }); sendCal(); }
     };
     document.body.appendChild(overlay);
   }

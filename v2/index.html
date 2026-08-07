@@ -353,6 +353,18 @@
   }
   .mt-nr-btn { font-size: 13px !important; padding: 7px 12px !important; }
 
+  /* Ear routing selector: B = binaural / sound field */
+  .mt-ear-wrap { display: inline-flex; border: 1px solid #bbb; border-radius: 6px; overflow: hidden; }
+  .mt-ear-btn { padding: 5px 10px; border: 0; background: #fff; font-size: 12px; font-weight: 700;
+                cursor: pointer; color: #555; border-right: 1px solid #ddd; font-family: inherit; }
+  .mt-ear-btn:last-child { border-right: 0; }
+  .mt-ear-btn.on { background: #1a5fa5; color: #fff; }
+
+  /* Which device is producing sound, and whether it is calibrated */
+  .mt-cal-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 10px;
+                  background: #ffe9e9; color: #a02020; border: 1px solid #e0b0b0; white-space: nowrap; }
+  .mt-cal-badge.calibrated { background: #eaf6e4; color: #2d7010; border-color: #a8d090; }
+
   @media (max-width: 700px) {
     #manualSetupView, #manualTestView {
       height: auto; overflow: visible;
@@ -801,6 +813,8 @@
   <script src="imageStore.js"></script>
   <script src="fifteenAFC.js"></script>
   <script src="listBuilder.js"></script>
+  <script src="calibration.js"></script>
+  <script src="calibrationUI.js"></script>
   <script src="manualTest.js"></script>
   <script src="pairedMode.js"></script>
 </body>

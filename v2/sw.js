@@ -10,7 +10,7 @@
  * cache on activate. Bump APP_VERSION on every deploy (or let your build stamp it).
  */
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const CACHE_NAME  = `ktt-v${APP_VERSION}`;
 
 // App shell — must-have files, including the formerly RapidPair-owned libs so a
@@ -23,6 +23,9 @@ const APP_SHELL = [
   './imageStore.js',
   './listBuilder.js',
   './manualTest.js',
+  './calibration.js',
+  './calibrationUI.js',
+  './responder.html',
   './pairedMode.js',
   './rapidpair.js',
   './qrcode.js',
@@ -38,6 +41,7 @@ const APP_SHELL = [
 const OPTIONAL = [
   './kupu_lists.tsv',
   './sounds/Kei_hea_te_01.mp3',
+  './sounds/noise.mp3',
 ];
 
 const PRELOAD_LIST = 'preloadfilelist.txt';

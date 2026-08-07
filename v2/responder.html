@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="mi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>KTT Responder</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <style>
+    /* Responder-only page. Deliberately contains no clinician UI: no lists, no
+       client details, no settings, no results. It can pair as a responder and
+       calibrate itself, and nothing else. */
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #f0f4f8; -webkit-text-size-adjust: 100%;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #respHome {
+      height: 100%; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px;
+      padding: 24px; box-sizing: border-box; text-align: center;
+    }
+    #respHome img { width: 84px; height: 84px; border-radius: 18px; }
+    h1 { font-size: 21px; color: #1a3a5c; margin: 0; }
+    p.sub { font-size: 13.5px; color: #667; margin: 0; max-width: 320px; line-height: 1.5; }
+    button.big {
+      padding: 15px 30px; font-size: 17px; font-weight: 600; border-radius: 11px;
+      border: 0; background: #1a5fa5; color: #fff; cursor: pointer; font-family: inherit;
+      min-width: 240px;
+    }
+    button.sub-btn {
+      padding: 11px 22px; font-size: 14px; border-radius: 9px; cursor: pointer;
+      border: 1px solid #c8a86a; background: #fff; color: #7a4a00; font-family: inherit;
+      min-width: 240px;
+    }
+    #calLine { font-size: 11.5px; color: #667; max-width: 320px; line-height: 1.45; }
+    #calLine.ok { color: #2d7010; }
+    #calLine.bad { color: #a02020; font-weight: 600; }
+    .foot { position: fixed; bottom: 10px; font-size: 10px; color: #99a; }
+  </style>
+</head>
+<body>
+
+  <div id="respHome">
+    <img src="icon-192.png" alt="" onerror="this.style.display='none'" />
+    <h1>Kendall Toy Test — Responder</h1>
+    <p class="sub">This device shows the pictures for the child and plays the sounds.
+       The clinician controls the test from their own device.</p>
+
+    <button class="big" id="pairBtn">Pair with clinician</button>
+    <button class="sub-btn" id="calBtn">🎚 Calibrate this device</button>
+    <div id="calLine"></div>
+  </div>
+
+  <div class="foot" id="verFoot"></div>
+
+  <script src="pako_min.js"></script>
+  <script src="qrcode.js"></script>
+  <script src="html5-qrcode_min.js"></script>
+  <script src="rapidpair.js"></script>
+  <script src="calibration.js"></script>
+  <script src="calibrationUI.js"></script>
+  <script>
+    // Tells pairedMode.js there is no clinician half on this page. Every call it
+    // makes into the clinician module is already optional-chained, so the
+    // responder path runs unchanged with window.kttManual simply absent.
+    window.KTT_RESPONDER_ONLY = true;
+  </script>
+  <script src="pairedMode.js"></script>
+  <script>
+    (function () {
+      const calLine = document.getElementById('calLine');
+
+      function refreshCal() {
+        const p = window.kttCal.profile();
+        calLine.textContent = window.kttCal.summary(p);
+        calLine.className = p.isCalibrated ? 'ok' : 'bad';
+      }
+
+      // Any calibration change is pushed to the clinician so their level control
+      // is bounded correctly the moment it happens, not just at pairing.
+      window.kttCalUI.onSaved = () => {
+        refreshCal();
+        if (window.kttPaired?.sendCal) window.kttPaired.sendCal();
+      };
+
+      document.getElementById('calBtn').onclick = () => window.kttCalUI.open();
+      document.getElementById('pairBtn').onclick = () => {
+        window.kttCal.prime();          // unlock audio inside a real gesture
+        window.kttPaired.openPairModal();
+      };
+
+      refreshCal();
+
+      if (window.kttPaired?.init) window.kttPaired.init();
+
+      // Once paired as responder, pairedMode.js creates and owns
+      // #ktt-responder-view; the home screen just gets out of the way.
+      const home = document.getElementById('respHome');
+      setInterval(() => {
+        const rv = document.getElementById('ktt-responder-view');
+        home.style.display = (rv && rv.style.display !== 'none') ? 'none' : 'flex';
+      }, 500);
+
+      // Keep the screen awake — an auto-lock mid-test drops the session.
+      if ('wakeLock' in navigator) {
+        const hold = () => navigator.wakeLock.request('screen').catch(() => {});
+        hold();
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') hold();
+        });
+      }
+
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+        navigator.serviceWorker.addEventListener?.('message', e => {
+          if (e.data?.type === 'SW_ACTIVATED') {
+            document.getElementById('verFoot').textContent = 'v' + e.data.version;
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
