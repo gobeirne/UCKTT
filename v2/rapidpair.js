@@ -452,6 +452,23 @@
     /** Manually show the pairing modal. */
     open() { this._showModal(); }
 
+    /* Open straight into one role, skipping the chooser. For hosts that already
+       know which side they are — e.g. a responder-only page, where offering the
+       controller option is not just noise but a way to get into a broken state. */
+    openAs(role) {
+      this._showModal();
+      if (role === 'responder') {
+        this._role = 'responder';
+        this._lastRole = 'responder';
+        this._showStep('step2responder');
+      } else {
+        this._role = 'controller';
+        this._lastRole = 'controller';
+        this._showStep('step2controller');
+        this._controllerGenerateCode();
+      }
+    }
+
     /** Manually hide the pairing modal. */
     close() { this._hideModal(); }
 

@@ -48,6 +48,7 @@
         background:#fafbfc; }
       .cal-test-head { font-weight:700;font-size:13px;color:#1a3a5c;margin-bottom:2px; }
       .cal-slider { width:100%;margin:4px 0; }
+      .cal-via { display:flex;gap:6px;align-items:center;font-size:11.5px;color:#556;margin:8px 0 2px; }
       .cal-test-level { font-size:19px;font-weight:700;color:#1a3a5c; }
       .cal-input { width:110px;padding:9px 10px;border:1px solid #bbb;border-radius:7px;
         font-size:16px;font-family:inherit; }
@@ -89,7 +90,7 @@
         playBtn.textContent = '■ Stop noise';
         playBtn.className = 'cal-btn playing';
       } catch (e) {
-        alert(`Could not play ${cal.NOISE_URL}\n\n${e.message}`);
+        alert(`Could not play the calibration noise.\n\nTried: ${cal.NOISE_CANDIDATES.join(', ')}\n\n${e.message}`);
       }
     };
 
@@ -117,28 +118,49 @@
       testSlider.value = String(lvl);
       testLabel.textContent = `${lvl} dB A`;
       if (cal.isTestPlaying()) cal.startTest(lvl, 'binaural');   // retune live
+      else if (viaPlayerRunning) { stopTesting(); testBtn.onclick(); }
     };
 
+    let viaPlayerRunning = false;
+
+    function stopTesting() {
+      cal.stopTest();
+      viaPlayerRunning = false;
+      cal.stopAll();
+      testBtn.textContent = '▶ Test level';
+      testBtn.className = 'cal-btn';
+    }
+
     testBtn.onclick = async () => {
-      if (cal.isTestPlaying()) {
-        cal.stopTest();
-        testBtn.textContent = '▶ Test level';
-        testBtn.className = 'cal-btn';
-        return;
-      }
+      if (cal.isTestPlaying() || viaPlayerRunning) { stopTesting(); return; }
+      const lvl = cal.snapLevel(testSlider.value);
       try {
         cal.prime();
-        await cal.startTest(cal.snapLevel(testSlider.value), 'binaural');
+        if (viaChk.checked) {
+          // Routed exactly as a kupu is: media element → gain → ear router.
+          // If this and the buffer path don't measure the same, something in
+          // the media path is altering level and calibration cannot be trusted.
+          viaPlayerRunning = true;
+          cal.play('kupu', cal.noiseURL(), { level: lvl, ear: 'binaural', loop: true });
+        } else {
+          await cal.startTest(lvl, 'binaural');
+        }
         testBtn.textContent = '■ Stop';
         testBtn.className = 'cal-btn playing';
       } catch (e) { alert(e.message); }
     };
 
+    const viaWrap = el('label', { cls: 'cal-via' });
+    const viaChk  = el('input', { type: 'checkbox' });
+    viaWrap.append(viaChk, document.createTextNode(
+      ' Play through the stimulus player (same path a kupu takes)'));
+    viaChk.onchange = () => { if (cal.isTestPlaying() || cal.isNoisePlaying()) stopTesting(); };
+
     testWrap.append(
       el('div', { cls: 'cal-test-head' }, 'Test output level'),
       el('div', { style: 'font-size:11.5px;color:#667;margin-bottom:8px' },
          'Plays the noise through the normal presentation path at the level below. Measure it: the meter should read what the slider says.'),
-      testSlider, testLabel, el('div', { cls: 'cal-row' }, testBtn),
+      testSlider, testLabel, viaWrap, el('div', { cls: 'cal-row' }, testBtn),
     );
 
     const saveBtn = el('button', { cls: 'cal-btn primary' }, 'Save calibration');
@@ -163,7 +185,7 @@
       if (typeof window.kttCalUI.onSaved === 'function') window.kttCalUI.onSaved(cal.profile());
     };
 
-    const close = () => { cal.stopNoise(); cal.stopTest(); overlay.remove(); };
+    const close = () => { cal.stopNoise(); cal.stopTest(); cal.stopAll(); overlay.remove(); };
     const closeBtn = el('button', { cls: 'cal-btn' }, 'Close');
     closeBtn.onclick = close;
     overlay.onclick = e => { if (e.target === overlay) close(); };

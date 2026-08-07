@@ -50,6 +50,7 @@
   let scoringMode   = 'free';
   let currentLevel  = DEFAULT_LEVEL;
   let currentEar    = 'binaural';   // 'left' | 'right' | 'binaural' | 'soundfield'
+  let presentations = [];           // one row per stimulus played, for the record
   let armedKupu     = null;
   let labelMode     = 'both';   // 'off' | 'child' | 'clinician' | 'both'
   // Derived helpers — keep older boolean call sites working.
@@ -376,6 +377,20 @@
     const responderPlays = window.kttPaired?.isConnected() &&
                            window.kttPaired.getAudioFromResponder();
 
+    window.kttLogs?.event('presentation', {
+      kupu, level: currentLevel, ear: currentEar,
+      device: responderPlays ? 'responder' : 'clinician',
+      unit: levelBounds().unit,
+      gain: responderPlays ? null
+            : Number(window.kttCal.gainForLevel(currentLevel).toFixed(6)),
+    }, `Presented ${kupu} at ${currentLevel} ${levelBounds().unit}`);
+
+    // Which device played, at what level and routing, for the record.
+    presentations.push({
+      t: Date.now(), kupu, level: currentLevel, unit: levelBounds().unit,
+      ear: currentEar, device: responderPlays ? 'responder' : 'clinician',
+    });
+
     if (!responderPlays) {
       // Routed through the calibration module: gain set from this device's
       // profile, ear routing applied, carrier then kupu at the same level.
@@ -479,6 +494,11 @@
     // Header right: debug log button. (Calibration now lives in-app, on the
     // setup card — the old external UCLing link has been removed.)
     const headerRight = el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap' });
+    headerRight.appendChild(el('button', { cls: 'mt-btn',
+      style: 'font-size:11px',
+      title: 'Clinician, responder and interleaved logs for this session',
+      onclick: () => window.kttLogViewer?.open()
+    }, '📋 Logs'));
     headerRight.appendChild(el('button', { cls: 'mt-btn',
       style: 'font-size:11px',
       onclick: () => window.kttDebugPanel?.toggle()
@@ -1000,6 +1020,10 @@
     infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
       onclick: () => printImageSheet() }, '🖨'));
 
+    infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
+      title: 'Session logs — this device, the child\u2019s device, and both interleaved',
+      onclick: () => window.kttLogViewer?.open() }, '📋 Logs'));
+
     // Audio source toggle (only visible when paired)
     if (window.kttPaired?.isConnected()) {
       infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
@@ -1101,7 +1125,10 @@
     const calBadge = el('div', {
       cls: 'mt-cal-badge' + (bounds.calibrated ? ' calibrated' : ''),
       title: bounds.calibrated
-        ? `Calibrated: max ${bounds.max} dB A on ${activeDeviceName()}. Device volume must be at maximum.`
+        ? `Range ${bounds.min}–${bounds.max} dB A on ${activeDeviceName()}. `
+          + (bounds.ceilingIsDevice ? `Ceiling is this device's calibrated maximum. ` : '')
+          + (bounds.floorIsClinical ? `Floor is the clinical minimum for this test. ` : '')
+          + `Device volume must be at maximum.`
         : `${activeDeviceName()} is NOT calibrated — the level control is a dB FS attenuator, not dB A.`
     }, bounds.calibrated ? `Calibrated · ${activeDeviceName()}` : `UNCALIBRATED · ${activeDeviceName()}`);
 
@@ -1309,7 +1336,20 @@
     // Uncalibrated (or no profile yet from the responder): a dB FS attenuator,
     // unity at 0 — never a fabricated dB(A) figure.
     if (!c || !c.isCalibrated) return { min: -60, max: 0, unit: 'dB FS', calibrated: false };
-    return { min: c.minLevel, max: c.maxLevel, unit: 'dB A', calibrated: true };
+
+    /* Two constraints, and BOTH apply. The calibration fixes what the device can
+       physically deliver: never above the measured maximum, and the dial spans
+       60 dB below it. LEVEL_MIN/LEVEL_MAX are the clinical range for this test.
+       Taking only the calibrated span (as this did until now) let the dial go
+       below 20 dB A on a device calibrated to 78.4, because 75 − 60 = 15. */
+    let min = Math.max(LEVEL_MIN, c.minLevel);
+    let max = Math.min(LEVEL_MAX, c.maxLevel);
+    // A device calibrated below the clinical floor can't reach it; rather than
+    // present an empty range, fall back to what it can actually do and say so.
+    if (min > max) { min = c.minLevel; max = c.maxLevel; }
+    return { min, max, unit: 'dB A', calibrated: true,
+             floorIsClinical: min === LEVEL_MIN && c.minLevel < LEVEL_MIN,
+             ceilingIsDevice: max === c.maxLevel && c.maxLevel < LEVEL_MAX };
   }
 
   function clampLevel(n) {
@@ -1332,6 +1372,10 @@
 
   function setLevel(n) {
     n = clampLevel(n);
+    if (n !== currentLevel) {
+      window.kttLogs?.event('level', { from: currentLevel, to: n, unit: levelBounds().unit },
+                            `Level ${currentLevel} → ${n}`);
+    }
     currentLevel = n;
     saveSettings({ lastLevel: n });
     const disp   = document.getElementById('mt-level-disp');
@@ -1832,7 +1876,7 @@
     }
 
     return {
-      schema_version: 3,   // 3 adds no_response counts / 'noresponse' pips
+      schema_version: 4,   // 3: no_response pips · 4: calibration + presentation record
       exported_at:    now.toISOString(),
       client:         { ...sessionMeta },
       clinic:         clinicSettings,
@@ -1844,6 +1888,24 @@
         levels_used:  levelsUsed.slice(),
       },
       notes:          sessionNotes,
+
+      /* Calibration is part of the result, not a side note: a presentation
+         level is uninterpretable without knowing which device produced it and
+         how that device was calibrated. Both profiles are recorded even if only
+         one was used, so a reader can see what the alternative would have been. */
+      calibration: {
+        clinician: window.kttCal ? window.kttCal.profile() : null,
+        responder: window.kttPaired?.getResponderCal?.() || null,
+        audio_source: (window.kttPaired?.isConnected() && window.kttPaired.getAudioFromResponder())
+                        ? 'responder' : 'clinician',
+        note: 'Levels are attenuations below the calibrated maximum; the playing '
+            + 'device\u2019s volume must be at maximum for them to hold.',
+      },
+      routing:        currentEar,
+      presentations:  presentations.slice(),
+      clock_skew:     window.kttLogs ? window.kttLogs.getSkew() : null,
+      reaction_times: window.kttLogs ? window.kttLogs.reactionTimes() : [],
+
       scores:         scoringGrid,
       ...(customImages ? { custom_images: customImages } : {}),
     };
@@ -1863,6 +1925,12 @@
       `List:           ${data.test.list_name}`,
       `Scoring mode:   ${SCORING_MODES[data.test.scoring_mode]?.label || data.test.scoring_mode}`,
       `Levels used:    ${data.test.levels_used.join(', ')} dBA`,
+      '',
+      '─── Calibration ───',
+      `Audio from: ${data.calibration.audio_source}`,
+      `Clinician:  ${window.kttCal ? window.kttCal.summary(data.calibration.clinician) : '—'}`,
+      `Responder:  ${data.calibration.responder ? window.kttCal.summary(data.calibration.responder) : 'not paired / unknown'}`,
+      `Routing:    ${data.routing}`,
       '',
       '─── Scores ───',
       '(correct/presented — *n = n presentations with no response)', '',
@@ -2018,6 +2086,21 @@
     // ── Scoring mode note ─────────────────────────────────────────────────
     const modeNote = SCORING_MODES[data.test.scoring_mode]?.label || data.test.scoring_mode;
 
+    // Calibration provenance for the report. A level with no calibration behind
+    // it must not be presented as dB(A), so the report says so in plain terms
+    // rather than quietly printing a number that looks like an SPL.
+    const calData  = data.calibration || {};
+    const srcLabel = calData.audio_source === 'responder' ? 'child\u2019s device' : 'clinician\u2019s device';
+    const usedCal  = calData.audio_source === 'responder' ? calData.responder : calData.clinician;
+    const calOk    = !!(usedCal && usedCal.isCalibrated);
+    const calLine  = calOk
+      ? `Calibrated to a maximum of <strong>${usedCal.measuredDbA} dB(A)</strong>` +
+        (usedCal.timestamp ? ` on ${new Date(usedCal.timestamp).toLocaleString('en-NZ', { dateStyle: 'medium', timeStyle: 'short' })}` : '') +
+        `; presentation levels are attenuations below that maximum, with device volume at maximum.`
+      : `This device was <strong>not calibrated</strong>: the level control was a dB FS attenuator (unity = 0).`;
+    const routingLabel = ({ left: 'Left ear', right: 'Right ear',
+                            binaural: 'Binaural', soundfield: 'Sound field' })[data.routing] || (data.routing || '—');
+
     // ── Header: custom logo takes priority over UC logo ───────────────────
     const clinic = data.clinic || {};
     const logoSrc     = clinic.logoDataURL || 'UClogo.png';
@@ -2054,6 +2137,9 @@
   tr:nth-child(even) td { background: #fafafa; }
   tr:nth-child(even) .kupu-col { background: #fafafa; }
 
+  .calbox { border: 1px solid #cbd8e4; background: #f4f8fc; border-radius: 6px;
+            padding: 8px 11px; font-size: 10.5px; color: #234; margin-bottom: 12px; line-height: 1.5; }
+  .calbox-warn { border-color: #e0b0b0; background: #fff4f4; color: #7a2020; }
   .key { display: flex; gap: 16px; align-items: center; margin-bottom: 14px; font-size: 10px; color: #666; }
   .key-dot { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: middle; margin-right: 3px; }
 
@@ -2089,6 +2175,13 @@
   <div class="client-field"><span class="client-label">Test list</span><span class="client-value">${data.test.list_name}</span></div>
   <div class="client-field"><span class="client-label">Scoring</span><span class="client-value">${modeNote}</span></div>
   <div class="client-field"><span class="client-label">Levels tested</span><span class="client-value">${lvls.length ? lvls.join(', ') + ' dBA' : '—'}</span></div>
+  <div class="client-field"><span class="client-label">Routing</span><span class="client-value">${routingLabel}</span></div>
+</div>
+
+<div class="calbox ${calOk ? '' : 'calbox-warn'}">
+  <strong>Calibration</strong> — sound presented from the <strong>${srcLabel}</strong>.
+  ${calLine}
+  ${calOk ? '' : '<br><em>Levels above are NOT calibrated sound pressure levels and must not be reported as dB(A).</em>'}
 </div>
 
 ${lvls.length ? `

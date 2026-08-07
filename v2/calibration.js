@@ -24,7 +24,12 @@
   'use strict';
 
   const STORAGE_KEY = 'kttCalibration';
-  const NOISE_URL   = 'sounds/noise.mp3';
+  /* Calibration noise. A .wav is preferred and probed first: it carries no
+     encoder padding, so it loops seamlessly and decodes to exactly the PCM that
+     was measured when the file was made. The .mp3 fallback works but needs the
+     loop trim below. */
+  const NOISE_CANDIDATES = ['sounds/noise.wav', 'sounds/noise.mp3'];
+  let   NOISE_URL   = NOISE_CANDIDATES[1];   // resolved on first use
 
   /* 40 ms of true digital silence, used as the placeholder src when priming the
      media elements. It MUST be silent: priming plays each element to satisfy
@@ -39,7 +44,15 @@
   const SPEECH_NOISE_OFFSET_DB = 0;
 
   const GATE_RAMP_MS  = 8;     // short ramp so opening/closing the gate doesn't click
-  const MAX_GATE_MS   = 15000; // absolute ceiling: nothing may sound longer than this
+  const MAX_GATE_MS   = 15000; // ceiling for a single stimulus presentation
+  /* Sustained sources — the calibration noise and the test tone — are held open
+     deliberately by a clinician with a visible Stop button in front of them, and
+     a measurement can take minutes. Applying the stimulus ceiling to them cut
+     the noise off mid-measurement, which is worse than useless: it invites a
+     reading taken from a signal that stopped part-way through. They still get a
+     ceiling, just one long enough to be a runaway guard rather than a timer. */
+  const MAX_SUSTAINED_MS = 20 * 60 * 1000;
+  const LOOP_TRIM_S   = 0.03;  // skip mp3 encoder padding at both ends of the loop
   const RANGE_SPAN_DB = 60;    // dial spans this far below the calibrated max
   const STEP_DB       = 5;
   const MAX_CLIP_MS   = 8000;  // playback watchdog
@@ -48,6 +61,7 @@
   let master  = null;          // every sound-producing path terminates here
   let gateHolders = 0;         // >0 = a deliberate presentation is in progress
   let gateWatchdog = null;
+  let gateDeadline = 0;
   let cal     = { measuredDbA: null, timestamp: null, isCalibrated: false };
   let calNode = null;                 // looping calibration noise source (unity)
   let testNode = null;                // looping test-level source (via presentation gain)
@@ -100,20 +114,22 @@
   // Acquire the gate for a presentation. Reference-counted, because a carrier
   // and a kupu are two sources within one presentation and the gate must not
   // slam shut between them.
-  function openGate(reason) {
+  function openGate(reason, opts) {
     ensureCtx();
+    const maxMs = (opts && opts.maxMs) || MAX_GATE_MS;
     gateHolders++;
     if (gateHolders === 1) {
       rampTo(1, GATE_RAMP_MS);
-      window.kttLogs?.event('gate-open', { reason }, `Audio gate opened: ${reason}`);
+      window.kttLogs?.event('gate-open', { reason, maxMs }, `Audio gate opened: ${reason}`);
     }
+    // The watchdog tracks the longest-lived holder, so a short stimulus opening
+    // alongside a sustained tone can't shorten the tone's allowance.
+    gateDeadline = Math.max(gateDeadline || 0, Date.now() + maxMs);
     clearTimeout(gateWatchdog);
-    // Hard ceiling. If a release is ever missed — a rejected promise, a stalled
-    // element, a bug not yet written — the gate still shuts on its own.
     gateWatchdog = setTimeout(() => {
-      warn(`gate watchdog: forcing closed after ${MAX_GATE_MS} ms (${reason})`);
+      warn(`gate watchdog: forcing closed after ${maxMs} ms (${reason})`);
       forceCloseGate('watchdog');
-    }, MAX_GATE_MS);
+    }, gateDeadline - Date.now());
     return { reason, released: false };
   }
 
@@ -123,6 +139,7 @@
     gateHolders = Math.max(0, gateHolders - 1);
     if (gateHolders === 0) {
       clearTimeout(gateWatchdog);
+      gateDeadline = 0;
       rampTo(0, GATE_RAMP_MS * 2);
     }
   }
@@ -130,6 +147,7 @@
   // Slam shut regardless of outstanding holders, and silence every source.
   function forceCloseGate(why) {
     gateHolders = 0;
+    gateDeadline = 0;
     clearTimeout(gateWatchdog);
     if (master) { try { master.gain.cancelScheduledValues(ctx.currentTime); } catch (_) {} master.gain.value = 0; }
     window.kttLogs?.event('gate-close', { why }, `Audio gate forced shut: ${why}`);
@@ -280,7 +298,8 @@
     const el = element(role);
     return new Promise(resolve => {
       let settled = false, watchdog = null;
-      const gate = openGate(`stimulus:${role}`);
+      const gate = openGate(`stimulus:${role}`,
+                            o.loop ? { maxMs: MAX_SUSTAINED_MS } : undefined);
       const done = ok => {
         if (settled) return;
         settled = true;
@@ -294,11 +313,15 @@
         g.gain.gain.value = gainForLevel(o.level);
         g.ear.setEar(o.ear || 'binaural');
 
-        el.onended = () => done(true);
+        el.loop = !!o.loop;
+        el.onended = () => { if (!el.loop) done(true); };
         el.onerror = () => { warn('media error:', url); done(false); };
         if (!el.src.endsWith(url)) el.src = url;
         el.currentTime = 0;
-        watchdog = setTimeout(() => { warn('watchdog fired for', url); done(true); }, MAX_CLIP_MS);
+        // A looped test tone is stopped by the clinician, not by the clip ending,
+        // so it gets the sustained ceiling rather than the stimulus one.
+        watchdog = setTimeout(() => { warn('watchdog fired for', url); done(true); },
+                              o.loop ? MAX_SUSTAINED_MS : MAX_CLIP_MS);
         const p = el.play();
         if (p && p.catch) p.catch(err => { warn('play rejected:', err.message); done(false); });
       } catch (e) {
@@ -312,7 +335,7 @@
   // running), then tidy up the sources behind it.
   function stopAll() {
     forceCloseGate('stopAll');
-    Object.values(els).forEach(a => { try { a.pause(); a.currentTime = 0; } catch (_) {} });
+    Object.values(els).forEach(a => { try { a.pause(); a.loop = false; a.currentTime = 0; } catch (_) {} });
     if (testNode) { try { testNode.stop(); } catch (_) {} testNode = null; }
     if (calNode)  { try { calNode.stop();  } catch (_) {} calNode  = null; }
     calGate = testGate = null;
@@ -320,25 +343,56 @@
 
   // ─── Calibration noise ────────────────────────────────────────────────────
 
+  async function loadNoise() {
+    if (noiseBuffer) return noiseBuffer;
+    const c = ensureCtx();
+    let lastErr = null;
+    for (const url of NOISE_CANDIDATES) {
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) { lastErr = new Error(`${url}: ${resp.status}`); continue; }
+        noiseBuffer = await c.decodeAudioData(await resp.arrayBuffer());
+        NOISE_URL = url;
+        log(`calibration noise: ${url} (${noiseBuffer.duration.toFixed(2)}s, ` +
+            `${noiseBuffer.numberOfChannels}ch @ ${noiseBuffer.sampleRate} Hz)`);
+        return noiseBuffer;
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('no calibration noise file found');
+  }
+
   async function startNoise() {
     const c = ensureCtx();
-    if (!noiseBuffer) {
-      const resp = await fetch(NOISE_URL);
-      if (!resp.ok) throw new Error(`${NOISE_URL} not found`);
-      noiseBuffer = await c.decodeAudioData(await resp.arrayBuffer());
-    }
+    await loadNoise();
     stopNoise();
     const src = c.createBufferSource();
     src.buffer = noiseBuffer;
     src.loop = true;
-    // Unity, no gain and no ear routing — this is the reference path the
-    // measured figure describes. It still passes the master gate, which the
-    // caller holds open for as long as the noise is running.
-    src.connect(output());
+    applyLoopTrim(src);
+    /* Unity gain, but through the SAME gain node and ear router the stimuli use.
+       Previously this ran straight to the output, which meant the path being
+       measured was not quite the path being used. The level is identical either
+       way — a mono buffer up-mixes to dual-mono at the destination just as the
+       router does — but "identical by argument" is weaker than "identical by
+       construction", and calibration is the wrong place to accept the weaker one. */
+    const gain = c.createGain();
+    gain.gain.value = 1.0;
+    src.connect(gain);
+    makeEarRouter(c, gain).setEar('binaural');
     src.start();
     calNode = src;
-    calGate = openGate('calibration-noise');
+    calGate = openGate('calibration-noise', { maxMs: MAX_SUSTAINED_MS });
     log('calibration noise playing at unity');
+  }
+
+  /* A .wav needs no trim; an .mp3 decodes with a few ms of encoder padding at
+     each end, and looping across that splices silence into continuous noise —
+     the click at the loop point. */
+  function applyLoopTrim(src) {
+    const isMp3 = /\.mp3$/i.test(NOISE_URL);
+    if (!isMp3 || !noiseBuffer || noiseBuffer.duration <= LOOP_TRIM_S * 4) return;
+    src.loopStart = LOOP_TRIM_S;
+    src.loopEnd   = noiseBuffer.duration - LOOP_TRIM_S;
   }
 
   function stopNoise() {
@@ -355,23 +409,20 @@
      that bypassed the presentation path would prove nothing about it. */
   async function startTest(levelDbA, ear) {
     const c = ensureCtx();
-    if (!noiseBuffer) {
-      const resp = await fetch(NOISE_URL);
-      if (!resp.ok) throw new Error(`${NOISE_URL} not found`);
-      noiseBuffer = await c.decodeAudioData(await resp.arrayBuffer());
-    }
+    await loadNoise();
     stopTest();
     stopNoise();
     const src  = c.createBufferSource();
     const gain = c.createGain();
     src.buffer = noiseBuffer;
     src.loop = true;
+    applyLoopTrim(src);
     gain.gain.value = gainForLevel(levelDbA);
     src.connect(gain);
     makeEarRouter(c, gain).setEar(ear || 'binaural');
     src.start();
     testNode = src;
-    testGate = openGate('test-level');
+    testGate = openGate('test-level', { maxMs: MAX_SUSTAINED_MS });
     log(`test level playing at ${levelDbA} ${unit()} (gain ${gain.gain.value.toFixed(5)})`);
   }
 
@@ -458,6 +509,8 @@
     isCalibrated: () => cal.isCalibrated,
     profile, summary, onChange,
     openGate, closeGate, forceCloseGate, gateIsOpen,
-    STEP_DB, SPEECH_NOISE_OFFSET_DB, NOISE_URL, SILENT_WAV, MAX_GATE_MS,
+    loadNoise, noiseURL: () => NOISE_URL,
+    STEP_DB, SPEECH_NOISE_OFFSET_DB, SILENT_WAV,
+    MAX_GATE_MS, MAX_SUSTAINED_MS, NOISE_CANDIDATES,
   };
 })();

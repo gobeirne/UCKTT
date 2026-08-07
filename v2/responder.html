@@ -58,10 +58,11 @@
 
   <div class="foot" id="verFoot"></div>
 
-  <script src="pako_min.js"></script>
+  <script src="pako.min.js"></script>
   <script src="qrcode.js"></script>
-  <script src="html5-qrcode_min.js"></script>
+  <script src="html5-qrcode.min.js"></script>
   <script src="rapidpair.js"></script>
+  <script src="imageStore.js"></script>
   <script src="logs.js"></script>
   <script src="preload.js"></script>
   <script src="calibration.js"></script>
@@ -94,7 +95,7 @@
       document.getElementById('calBtn').onclick = () => window.kttCalUI.open();
       document.getElementById('pairBtn').onclick = () => {
         window.kttCal.prime();          // unlock audio inside a real gesture
-        window.kttPaired.openPairModal();
+        window.kttPaired.openPairModal('responder');
       };
 
       refreshCal();
