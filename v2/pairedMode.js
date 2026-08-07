@@ -210,7 +210,13 @@
       await window.kttCal.play('kupu',    kupuURL,    { level, ear });
       return;
     }
+    // Fallback only. These elements are NOT routed through the master gate, so
+    // they can produce sound outside the level logic. With calibration.js
+    // present this is unreachable; if it ever runs, say so loudly.
     if (_mediaPrimed && respCarrier && respKupuAud) {
+      kttWarn('🎵', 'UNGATED FALLBACK PATH — audio is bypassing the master gate and the level control');
+      window.kttLogs?.event('ungated-playback', { carrierURL, kupuURL, level, ear },
+                            'Fallback playback bypassed the master gate');
       const okCarrier = await playMediaEl(respCarrier, carrierURL);
       const okKupu    = await playMediaEl(respKupuAud, kupuURL);
       if (okCarrier || okKupu) return;
@@ -234,6 +240,8 @@
     getAudioFromResponder:() => audioFromResponder,
     getResponderCal:      () => responderCal,
     sendCal,
+    sendLogBatch,
+    measureClockSkew,
     sendPlay,
     sendSync,
     sendDisplay,
@@ -494,6 +502,9 @@
     pairEl.on('ktt-image-chunk', onKttImageChunk);
     pairEl.on('ktt-play',        onKttPlay);
     pairEl.on('ktt-cal',         onKttCal);
+    pairEl.on('ktt-log',         onKttLog);
+    pairEl.on('ktt-ping',        onKttPing);
+    pairEl.on('ktt-pong',        onKttPong);
     pairEl.on('ktt-confirm',     onKttConfirm);
     pairEl.on('ktt-list-reset',  onKttListReset);
     pairEl.on('ktt-list-update', onKttSync);
@@ -580,8 +591,17 @@
     kttLog('🔒', 'SECURE — role:', pairRole, '| verifyCode:', e.detail.verifyCode);
     updateStatusBadge('connected');
 
+    // The log store needs to know which side it is before anything is recorded.
+    window.kttLogs?.setRole(pairRole === 'controller' ? 'clinician' : 'responder');
+    window.kttLogs?.resetSkew();
+    window.kttLogs?.event('paired', { role: pairRole, verifyCode: e.detail.verifyCode },
+                          'Secure pairing established');
+
     if (pairRole === 'controller') {
       initReconnectSecret();
+      // Measure the clock offset once the channel is quiet enough to be honest
+      // about round-trip time — during setup the link is busy with list sync.
+      setTimeout(() => measureClockSkew(7), 2500);
       const list = window.kttManual?.getActiveListForPair?.();
       kttLog('📋', 'Controller: sending list-reset, list:', list?.name || 'none');
       sendListReset(list?.name || '');
@@ -594,6 +614,10 @@
   let _disconnectDebounce = null;
 
   function onDisconnected() {
+    // Losing the link mid-presentation must not leave sound running on a device
+    // that is no longer being controlled.
+    window.kttCal?.forceCloseGate('peer disconnected');
+    window.kttLogs?.flush();
     // Debounce — RapidPair can fire this many times rapidly during ICE failures
     clearTimeout(_disconnectDebounce);
     _disconnectDebounce = setTimeout(() => {
@@ -1103,6 +1127,53 @@
     }
   }
 
+  // ─── Log transport and clock alignment ────────────────────────────────────
+
+  function sendLogBatch(entries) {
+    if (!pairSecure || pairRole !== 'responder') return false;
+    pairEl.send('ktt-log', { entries });
+    return true;
+  }
+
+  function onKttLog(p) {
+    if (pairRole !== 'controller') return;
+    window.kttLogs?.receiveBatch(p?.entries);
+  }
+
+  // The responder answers with its own clock reading; the controller does the
+  // arithmetic, since it is the device that owns the combined record.
+  function onKttPing(p) {
+    if (pairRole !== 'responder') return;
+    pairEl.send('ktt-pong', { t0: p?.t0, t1: Date.now() });
+  }
+
+  function onKttPong(p) {
+    if (pairRole !== 'controller' || !p || p.t0 == null) return;
+    const s = window.kttLogs?.noteSkewSample(p.t0, p.t1, Date.now());
+    if (s) kttLog('⏱', `Clock sample: offset ${s.offsetMs} ms, RTT ${s.rttMs} ms (${s.samples} taken)`);
+  }
+
+  /* Fire a burst of samples and keep the best. One sample is not enough: a
+     single delayed packet biases the offset by half its excess delay. */
+  function measureClockSkew(samples) {
+    if (!pairSecure || pairRole !== 'controller') return;
+    const n = samples || 7;
+    let i = 0;
+    const tick = () => {
+      if (i++ >= n || !pairSecure) {
+        const s = window.kttLogs?.getSkew();
+        if (s && s.offsetMs !== null) {
+          kttLog('⏱', `Clock skew settled: peer ${s.offsetMs >= 0 ? '+' : ''}${s.offsetMs} ms, best RTT ${s.rttMs} ms`);
+          window.kttLogs?.event('clock-skew', s, 'Clock alignment measured');
+        }
+        return;
+      }
+      pairEl.send('ktt-ping', { t0: Date.now() });
+      setTimeout(tick, 250);
+    };
+    tick();
+  }
+
   // ─── Calibration exchange ─────────────────────────────────────────────────
   // The responder tells the controller how it is calibrated, so the level
   // control can be bounded by whichever device is actually producing sound.
@@ -1118,6 +1189,8 @@
   function onKttCal(p) {
     if (pairRole !== 'controller') return;
     responderCal = p || null;
+    window.kttLogs?.event('calibration', Object.assign({ device: 'responder' }, p || {}),
+                          'Responder calibration received');
     kttLog('🎚', 'Received responder calibration:',
            window.kttCal ? window.kttCal.summary(p) : JSON.stringify(p));
     if (typeof window.kttManual?.onResponderCal === 'function') {
@@ -1147,8 +1220,15 @@
         armed = true;
         clearTimeout(armWatchdog);
         kttLog('🎵', `Arming grid (${why})`);
+        window.kttLogs?.event('audio-complete', { kupu: p.kupu, level: p.level, why },
+                              'Stimulus finished, grid armed');
         respArmed = true; sendMirrorState();
       };
+      window.kttLogs?.event('presentation', {
+        kupu: p.kupu, level: p.level, ear: p.ear || 'binaural', device: 'responder',
+        gain: window.kttCal ? Number(window.kttCal.gainForLevel(p.level).toFixed(6)) : null,
+        unit: window.kttCal?.isCalibrated() ? 'dB A' : 'dB FS',
+      }, `Presented ${p.kupu}`);
       const armWatchdog = setTimeout(() => armNow('watchdog — audio never completed'),
                                      MAX_CLIP_MS * 2 + 1000);
 
@@ -1428,6 +1508,7 @@
     if (cell) cell.classList.add('resp-tapped');
     if (pairSecure) {
       kttLog('👆', 'Sending ktt-response:', kupu);
+      window.kttLogs?.event('response', { kupu }, `Child tapped ${kupu}`);
       pairEl.send('ktt-response', { kupu, ts: Date.now() });
       sendMirrorState();
     } else {

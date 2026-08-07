@@ -38,14 +38,21 @@
   // the current sound set. Change here if the noise is ever re-rendered.
   const SPEECH_NOISE_OFFSET_DB = 0;
 
+  const GATE_RAMP_MS  = 8;     // short ramp so opening/closing the gate doesn't click
+  const MAX_GATE_MS   = 15000; // absolute ceiling: nothing may sound longer than this
   const RANGE_SPAN_DB = 60;    // dial spans this far below the calibrated max
   const STEP_DB       = 5;
   const MAX_CLIP_MS   = 8000;  // playback watchdog
 
   let ctx     = null;
+  let master  = null;          // every sound-producing path terminates here
+  let gateHolders = 0;         // >0 = a deliberate presentation is in progress
+  let gateWatchdog = null;
   let cal     = { measuredDbA: null, timestamp: null, isCalibrated: false };
   let calNode = null;                 // looping calibration noise source (unity)
   let testNode = null;                // looping test-level source (via presentation gain)
+  let calGate  = null;
+  let testGate = null;
   let noiseBuffer = null;
   const els    = {};                  // role → HTMLAudioElement
   const graphs = new WeakMap();       // element → { source, gain, ear }
@@ -56,11 +63,79 @@
 
   // ─── Audio context ────────────────────────────────────────────────────────
 
+  /* Master gate.
+     Every path that can make a sound — stimuli, calibration noise, the test
+     tone, even the silent priming plays — terminates at this one gain node, and
+     it sits at ZERO unless a deliberate presentation has opened it. This is a
+     structural guarantee rather than a behavioural one: no future code path,
+     error branch, watchdog or half-finished refactor can produce audible output
+     without going through openGate(), because there is no other route to the
+     speaker. The device may be strapped to an audiometer feeding a child's ear,
+     so "we remembered to pause it" is not a strong enough property. */
   function ensureCtx() {
-    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain();
+      master.gain.value = 0;
+      master.connect(ctx.destination);
+    }
     if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     return ctx;
   }
+
+  function output() { ensureCtx(); return master; }
+
+  function rampTo(value, ms) {
+    if (!master) return;
+    const t = ctx.currentTime;
+    try {
+      master.gain.cancelScheduledValues(t);
+      master.gain.setValueAtTime(master.gain.value, t);
+      master.gain.linearRampToValueAtTime(value, t + (ms || GATE_RAMP_MS) / 1000);
+    } catch (_) {
+      master.gain.value = value;
+    }
+  }
+
+  // Acquire the gate for a presentation. Reference-counted, because a carrier
+  // and a kupu are two sources within one presentation and the gate must not
+  // slam shut between them.
+  function openGate(reason) {
+    ensureCtx();
+    gateHolders++;
+    if (gateHolders === 1) {
+      rampTo(1, GATE_RAMP_MS);
+      window.kttLogs?.event('gate-open', { reason }, `Audio gate opened: ${reason}`);
+    }
+    clearTimeout(gateWatchdog);
+    // Hard ceiling. If a release is ever missed — a rejected promise, a stalled
+    // element, a bug not yet written — the gate still shuts on its own.
+    gateWatchdog = setTimeout(() => {
+      warn(`gate watchdog: forcing closed after ${MAX_GATE_MS} ms (${reason})`);
+      forceCloseGate('watchdog');
+    }, MAX_GATE_MS);
+    return { reason, released: false };
+  }
+
+  function closeGate(token) {
+    if (!token || token.released) return;
+    token.released = true;
+    gateHolders = Math.max(0, gateHolders - 1);
+    if (gateHolders === 0) {
+      clearTimeout(gateWatchdog);
+      rampTo(0, GATE_RAMP_MS * 2);
+    }
+  }
+
+  // Slam shut regardless of outstanding holders, and silence every source.
+  function forceCloseGate(why) {
+    gateHolders = 0;
+    clearTimeout(gateWatchdog);
+    if (master) { try { master.gain.cancelScheduledValues(ctx.currentTime); } catch (_) {} master.gain.value = 0; }
+    window.kttLogs?.event('gate-close', { why }, `Audio gate forced shut: ${why}`);
+  }
+
+  function gateIsOpen() { return gateHolders > 0; }
 
   // Must be called from inside a user gesture. Sets the iOS audio session to
   // 'playback' (otherwise the context is silenced by the Ring/Silent switch and
@@ -73,11 +148,15 @@
       const c = ensureCtx();
       const b = c.createBuffer(1, 1, 22050);
       const s = c.createBufferSource();
-      s.buffer = b; s.connect(c.destination); s.start(0);
+      s.buffer = b; s.connect(output()); s.start(0);   // silent, and gated anyway
     } catch (e) { warn('context prime failed:', e.message); }
 
     ['carrier', 'kupu'].forEach(role => {
       const el = element(role);
+      // Build the graph BEFORE priming, so the priming play goes through the
+      // (closed) master gate rather than straight out of the element. Combined
+      // with the silent placeholder, priming is inaudible two ways over.
+      try { graphFor(el); } catch (e) { warn('graph build failed during prime:', e.message); }
       // The element must be stopped whether play() resolves OR rejects. An
       // interrupted play (AbortError is common on the first gesture, when both
       // elements start at once) previously left it running and then unmuted it.
@@ -125,7 +204,7 @@
     stereoize.connect(splitter);
     splitter.connect(leftGain, 0).connect(merger, 0, 0);
     splitter.connect(rightGain, 1).connect(merger, 0, 1);
-    merger.connect(c.destination);
+    merger.connect(output());
 
     // 'binaural' and 'soundfield' both feed two channels at unchanged level;
     // they are kept distinct so the record says which was actually used.
@@ -201,10 +280,12 @@
     const el = element(role);
     return new Promise(resolve => {
       let settled = false, watchdog = null;
+      const gate = openGate(`stimulus:${role}`);
       const done = ok => {
         if (settled) return;
         settled = true;
         clearTimeout(watchdog);
+        closeGate(gate);
         el.onended = el.onerror = null;
         resolve(ok);
       };
@@ -227,9 +308,14 @@
     });
   }
 
+  // Panic stop: shut the gate first (instant silence regardless of what is
+  // running), then tidy up the sources behind it.
   function stopAll() {
+    forceCloseGate('stopAll');
     Object.values(els).forEach(a => { try { a.pause(); a.currentTime = 0; } catch (_) {} });
-    stopTest();
+    if (testNode) { try { testNode.stop(); } catch (_) {} testNode = null; }
+    if (calNode)  { try { calNode.stop();  } catch (_) {} calNode  = null; }
+    calGate = testGate = null;
   }
 
   // ─── Calibration noise ────────────────────────────────────────────────────
@@ -245,16 +331,19 @@
     const src = c.createBufferSource();
     src.buffer = noiseBuffer;
     src.loop = true;
-    // Straight to destination at unity — no gain, no ear routing. This is the
-    // reference path the measured figure describes.
-    src.connect(c.destination);
+    // Unity, no gain and no ear routing — this is the reference path the
+    // measured figure describes. It still passes the master gate, which the
+    // caller holds open for as long as the noise is running.
+    src.connect(output());
     src.start();
     calNode = src;
+    calGate = openGate('calibration-noise');
     log('calibration noise playing at unity');
   }
 
   function stopNoise() {
     if (calNode) { try { calNode.stop(); } catch (_) {} calNode = null; }
+    closeGate(calGate); calGate = null;
   }
 
   function isNoisePlaying() { return !!calNode; }
@@ -282,11 +371,13 @@
     makeEarRouter(c, gain).setEar(ear || 'binaural');
     src.start();
     testNode = src;
+    testGate = openGate('test-level');
     log(`test level playing at ${levelDbA} ${unit()} (gain ${gain.gain.value.toFixed(5)})`);
   }
 
   function stopTest() {
     if (testNode) { try { testNode.stop(); } catch (_) {} testNode = null; }
+    closeGate(testGate); testGate = null;
   }
 
   function isTestPlaying() { return !!testNode; }
@@ -366,6 +457,7 @@
     gainForLevel, maxLevel, minLevel, snapLevel, unit,
     isCalibrated: () => cal.isCalibrated,
     profile, summary, onChange,
-    STEP_DB, SPEECH_NOISE_OFFSET_DB, NOISE_URL, SILENT_WAV,
+    openGate, closeGate, forceCloseGate, gateIsOpen,
+    STEP_DB, SPEECH_NOISE_OFFSET_DB, NOISE_URL, SILENT_WAV, MAX_GATE_MS,
   };
 })();

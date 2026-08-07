@@ -62,6 +62,7 @@
   <script src="qrcode.js"></script>
   <script src="html5-qrcode_min.js"></script>
   <script src="rapidpair.js"></script>
+  <script src="logs.js"></script>
   <script src="preload.js"></script>
   <script src="calibration.js"></script>
   <script src="calibrationUI.js"></script>
@@ -107,6 +108,15 @@
         const rv = document.getElementById('ktt-responder-view');
         home.style.display = (rv && rv.style.display !== 'none') ? 'none' : 'flex';
       }, 500);
+
+      // Anything that takes the page out of the foreground silences it: a
+      // backgrounded responder is one nobody is watching.
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') {
+          window.kttCal?.forceCloseGate('responder backgrounded');
+        }
+      });
+      window.addEventListener('pagehide', () => window.kttCal?.forceCloseGate('pagehide'));
 
       // Keep the screen awake — an auto-lock mid-test drops the session.
       if ('wakeLock' in navigator) {
