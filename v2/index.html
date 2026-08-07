@@ -242,7 +242,7 @@
 
   /* Test layout */
   .mt-test-body { display: grid; grid-template-columns: 1fr 210px; flex: 1; min-height: 0; overflow: hidden; }
-  .mt-test-main { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid #e0e0e0; }
+  .mt-test-main { display: flex; flex-direction: column; overflow: hidden; min-height: 0; border-right: 1px solid #e0e0e0; }
   .mt-test-sidebar { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; background: #f7f7f7; overflow-y: auto; }
   .mt-side-section { display: flex; flex-direction: column; gap: 4px; }
 
@@ -258,7 +258,10 @@
   .mt-play-btn { font-size: 13px !important; padding: 7px 16px !important; }
 
   /* Table */
-  .mt-table-wrap { flex: 1; overflow: auto; }
+  /* min-height:0 is load-bearing: without it this flex child refuses to shrink
+     below its content height, so overflow:auto never engages and the tall
+     images view is simply clipped instead of scrolling. */
+  .mt-table-wrap { flex: 1; min-height: 0; overflow: auto; }
   .mt-table-empty { padding: 32px 20px; text-align: center; font-size: 13px; color: #aaa; }
   .mt-ktable { width: 100%; border-collapse: collapse; font-size: 12px; }
   .mt-ktable th { font-size: 11px; font-weight: 700; color: #666; padding: 5px 4px; text-align: center; border-bottom: 1px solid #ddd; white-space: nowrap; background: #f7f7f7; position: sticky; top: 0; z-index: 1; }
@@ -351,11 +354,13 @@
     from { box-shadow: inset 3px 0 0 0 rgba(26,95,165,.55); }
     to   { box-shadow: inset 220px 0 0 0 rgba(26,95,165,.18); }
   }
+  .mt-pre-bar { height: 5px; background: #e8e8e8; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .mt-pre-fill { height: 100%; width: 0; background: #1a5fa5; transition: width .2s ease; }
   .mt-nr-btn { font-size: 13px !important; padding: 7px 12px !important; }
 
   /* Ear routing selector: B = binaural / sound field */
   .mt-ear-wrap { display: inline-flex; border: 1px solid #bbb; border-radius: 6px; overflow: hidden; }
-  .mt-ear-btn { padding: 5px 10px; border: 0; background: #fff; font-size: 12px; font-weight: 700;
+  .mt-ear-btn { padding: 5px 8px; border: 0; background: #fff; font-size: 12px; font-weight: 700;
                 cursor: pointer; color: #555; border-right: 1px solid #ddd; font-family: inherit; }
   .mt-ear-btn:last-child { border-right: 0; }
   .mt-ear-btn.on { background: #1a5fa5; color: #fff; }
@@ -801,6 +806,18 @@
     window.kttDebugPanel = { toggle, entries };
 
     // Log startup
+    // Warm the asset cache once per deployed version. KTT_APP_VERSION arrives
+    // asynchronously from the service worker, so wait briefly for it — keying
+    // the "already done" flag on a placeholder would stop a new deploy from
+    // ever re-warming the cache.
+    (function waitForVersion(tries) {
+      if (!window.kttPreload) return;
+      if (window.KTT_APP_VERSION || tries <= 0) {
+        window.kttPreload.autoRun(window.KTT_APP_VERSION || 'unversioned');
+      } else {
+        setTimeout(() => waitForVersion(tries - 1), 500);
+      }
+    })(12);
     console.log('[KTT] 🐛 Debug panel ready. Call kttDebugPanel.toggle() or tap "Debug log".');
   })();
   </script>
@@ -813,6 +830,7 @@
   <script src="imageStore.js"></script>
   <script src="fifteenAFC.js"></script>
   <script src="listBuilder.js"></script>
+  <script src="preload.js"></script>
   <script src="calibration.js"></script>
   <script src="calibrationUI.js"></script>
   <script src="manualTest.js"></script>

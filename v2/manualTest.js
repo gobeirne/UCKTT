@@ -49,7 +49,7 @@
   let activeListId  = null;
   let scoringMode   = 'free';
   let currentLevel  = DEFAULT_LEVEL;
-  let currentEar    = 'binaural';   // 'left' | 'right' | 'binaural' (incl. sound field)
+  let currentEar    = 'binaural';   // 'left' | 'right' | 'binaural' | 'soundfield'
   let armedKupu     = null;
   let labelMode     = 'both';   // 'off' | 'child' | 'clinician' | 'both'
   // Derived helpers — keep older boolean call sites working.
@@ -469,13 +469,16 @@
         '⚙ Adjusting settings — your test is still running. Changes apply live; only switching list ends it.'));
       banner.appendChild(el('button', { cls: 'mt-btn-sm-primary',
         onclick: () => returnToTest() }, '← Back to test'));
+      banner.appendChild(el('button', { cls: 'mt-btn',
+        style: 'font-size:11px;color:#c0392b;border-color:#e0b0b0',
+        title: 'Finish this test and clear the client details',
+        onclick: () => { inTestSettings = false; navigateToSetup(); } }, 'End test'));
       root.appendChild(banner);
     }
 
-    // Header right: calibration link + debug log button
+    // Header right: debug log button. (Calibration now lives in-app, on the
+    // setup card — the old external UCLing link has been removed.)
     const headerRight = el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap' });
-    headerRight.appendChild(el('a', { cls: 'mt-btn', href: 'https://gobeirne.github.io/UCLing/', target: '_blank' },
-      '🔊 Calibration'));
     headerRight.appendChild(el('button', { cls: 'mt-btn',
       style: 'font-size:11px',
       onclick: () => window.kttDebugPanel?.toggle()
@@ -733,9 +736,48 @@
       }, 'Forget'));
       card.appendChild(forgetRow);
     }
+    // Asset preload — warm the cache before a clinic rather than mid-test.
+    const preRow = el('div', { style: 'margin-top:6px' });
+    const preBar = el('div', { cls: 'mt-pre-bar' }, el('div', { cls: 'mt-pre-fill', id: 'mt-pre-fill' }));
+    const preMsg = el('div', { id: 'mt-pre-msg', style: 'font-size:10px;color:#667;margin-top:2px' },
+      'Images and audio (~3 MB) cached for offline use.');
+    const preBtn = el('button', { cls: 'mt-btn', style: 'width:100%',
+      onclick: () => {
+        preBtn.disabled = true;
+        window.kttPreload.onProgress(st => {
+          const fill = document.getElementById('mt-pre-fill');
+          const msg  = document.getElementById('mt-pre-msg');
+          if (!fill || !msg) return;
+          if (st.phase === 'progress' || st.phase === 'start') {
+            fill.style.width = `${Math.round((st.done / st.total) * 100)}%`;
+            msg.textContent = `Caching ${st.done}/${st.total}…`;
+          } else if (st.phase === 'done') {
+            fill.style.width = '100%';
+            msg.textContent = st.failed
+              ? `Cached ${st.done - st.failed}/${st.total} — ${st.failed} failed (see debug log)`
+              : `All ${st.total} assets cached in ${st.seconds}s`;
+            msg.style.color = st.failed ? '#a02020' : '#2d7010';
+            preBtn.disabled = false;
+          } else if (st.phase === 'error') {
+            msg.textContent = `Preload failed: ${st.message}`;
+            msg.style.color = '#a02020';
+            preBtn.disabled = false;
+          }
+        });
+        window.kttPreload.run({ version: 'manual' });
+      }
+    }, '📦 Preload all images & audio');
+    preRow.append(preBtn, preBar, preMsg);
+    card.appendChild(preRow);
+
     card.appendChild(el('button', { cls: 'mt-btn',
       style: 'width:100%;margin-top:4px;color:#7a4a00;border-color:#e0c08a',
-      onclick: () => window.kttCalUI.open()
+      onclick: () => {
+        // Re-render so the summary line below reflects the new profile, and
+        // push the change to the clinician's dial bounds immediately.
+        window.kttCalUI.onSaved = () => { renderSetupScreen(); };
+        window.kttCalUI.open();
+      }
     }, '🎚 Calibrate this device'));
     const calProf = window.kttCal ? window.kttCal.profile() : null;
     card.appendChild(el('div', {
@@ -913,7 +955,8 @@
       statusBadge.style.cssText = 'display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7';
     }
     hdrRight.appendChild(el('button', { cls: 'mt-btn',
-      onclick: () => navigateToSetup()
+      title: 'Adjust settings without ending the test',
+      onclick: () => openSettingsDuringTest()
     }, '← Setup'));
     hdrRight.appendChild(el('button', { cls: 'mt-btn-primary',
       onclick: saveResults }, '↓ Save results'));
@@ -956,11 +999,6 @@
 
     infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
       onclick: () => printImageSheet() }, '🖨'));
-
-    // Dip into settings without ending the test (#6).
-    infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
-      title: 'Adjust settings without ending the test',
-      onclick: () => openSettingsDuringTest() }, '⚙'));
 
     // Audio source toggle (only visible when paired)
     if (window.kttPaired?.isConnected()) {
@@ -1048,10 +1086,13 @@
 
     // Ear routing. 'Binaural' covers sound-field presentation.
     const earWrap = el('div', { cls: 'mt-ear-wrap' });
-    [['left','L'],['binaural','B'],['right','R']].forEach(([val, lbl]) => {
+    [['left','L'],['right','R'],['binaural','Bin'],['soundfield','Soundfield']].forEach(([val, lbl]) => {
       earWrap.appendChild(el('button', {
         cls: 'mt-ear-btn' + (currentEar === val ? ' on' : ''),
-        title: val === 'binaural' ? 'Binaural / sound field' : `${val} ear only`,
+        title: val === 'left'  ? 'Left ear only'
+             : val === 'right' ? 'Right ear only'
+             : val === 'binaural' ? 'Both ears (insert/headphones)'
+             : 'Sound field',
         onclick: () => { currentEar = val; saveSettings({ lastEar: val }); renderTestScreen(); }
       }, lbl));
     });

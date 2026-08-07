@@ -36,7 +36,8 @@
 
   let ctx     = null;
   let cal     = { measuredDbA: null, timestamp: null, isCalibrated: false };
-  let calNode = null;                 // looping calibration noise source
+  let calNode = null;                 // looping calibration noise source (unity)
+  let testNode = null;                // looping test-level source (via presentation gain)
   let noiseBuffer = null;
   const els    = {};                  // role → HTMLAudioElement
   const graphs = new WeakMap();       // element → { source, gain, ear }
@@ -111,9 +112,12 @@
     splitter.connect(rightGain, 1).connect(merger, 0, 1);
     merger.connect(c.destination);
 
+    // 'binaural' and 'soundfield' both feed two channels at unchanged level;
+    // they are kept distinct so the record says which was actually used.
     const setEar = ear => {
-      leftGain.gain.value  = (ear === 'left'  || ear === 'binaural') ? 1 : 0;
-      rightGain.gain.value = (ear === 'right' || ear === 'binaural') ? 1 : 0;
+      const both = (ear === 'binaural' || ear === 'soundfield' || !ear);
+      leftGain.gain.value  = (both || ear === 'left')  ? 1 : 0;
+      rightGain.gain.value = (both || ear === 'right') ? 1 : 0;
     };
     setEar('binaural');
     return { setEar };
@@ -210,6 +214,7 @@
 
   function stopAll() {
     Object.values(els).forEach(a => { try { a.pause(); a.currentTime = 0; } catch (_) {} });
+    stopTest();
   }
 
   // ─── Calibration noise ────────────────────────────────────────────────────
@@ -238,6 +243,38 @@
   }
 
   function isNoisePlaying() { return !!calNode; }
+
+  /* Test level: play the same noise back through the *presentation* gain path
+     at a chosen level, so the clinician can put the meter on it and confirm
+     the app is delivering what the dial claims. Routed exactly like a real
+     stimulus — gain from the profile, ear routing applied — because a check
+     that bypassed the presentation path would prove nothing about it. */
+  async function startTest(levelDbA, ear) {
+    const c = ensureCtx();
+    if (!noiseBuffer) {
+      const resp = await fetch(NOISE_URL);
+      if (!resp.ok) throw new Error(`${NOISE_URL} not found`);
+      noiseBuffer = await c.decodeAudioData(await resp.arrayBuffer());
+    }
+    stopTest();
+    stopNoise();
+    const src  = c.createBufferSource();
+    const gain = c.createGain();
+    src.buffer = noiseBuffer;
+    src.loop = true;
+    gain.gain.value = gainForLevel(levelDbA);
+    src.connect(gain);
+    makeEarRouter(c, gain).setEar(ear || 'binaural');
+    src.start();
+    testNode = src;
+    log(`test level playing at ${levelDbA} ${unit()} (gain ${gain.gain.value.toFixed(5)})`);
+  }
+
+  function stopTest() {
+    if (testNode) { try { testNode.stop(); } catch (_) {} testNode = null; }
+  }
+
+  function isTestPlaying() { return !!testNode; }
 
   // ─── Profile ──────────────────────────────────────────────────────────────
 
@@ -309,6 +346,7 @@
     prime, ensureCtx,
     play, stopAll,
     startNoise, stopNoise, isNoisePlaying,
+    startTest, stopTest, isTestPlaying,
     applyLevel, clear,
     gainForLevel, maxLevel, minLevel, snapLevel, unit,
     isCalibrated: () => cal.isCalibrated,

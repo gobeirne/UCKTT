@@ -62,6 +62,7 @@
   <script src="qrcode.js"></script>
   <script src="html5-qrcode_min.js"></script>
   <script src="rapidpair.js"></script>
+  <script src="preload.js"></script>
   <script src="calibration.js"></script>
   <script src="calibrationUI.js"></script>
   <script>
@@ -85,6 +86,7 @@
       // is bounded correctly the moment it happens, not just at pairing.
       window.kttCalUI.onSaved = () => {
         refreshCal();
+      if (window.kttPreload) window.kttPreload.autoRun('responder');
         if (window.kttPaired?.sendCal) window.kttPaired.sendCal();
       };
 

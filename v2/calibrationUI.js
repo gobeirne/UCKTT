@@ -44,6 +44,11 @@
       .cal-btn.playing { background:#c0392b;border-color:#c0392b;color:#fff;font-weight:600; }
       .cal-btn:disabled { opacity:.45;cursor:not-allowed; }
       .cal-row { display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px; }
+      .cal-test { border:1px solid #e0e0e0;border-radius:9px;padding:12px 14px;margin:14px 0;
+        background:#fafbfc; }
+      .cal-test-head { font-weight:700;font-size:13px;color:#1a3a5c;margin-bottom:2px; }
+      .cal-slider { width:100%;margin:4px 0; }
+      .cal-test-level { font-size:19px;font-weight:700;color:#1a3a5c; }
       .cal-input { width:110px;padding:9px 10px;border:1px solid #bbb;border-radius:7px;
         font-size:16px;font-family:inherit; }
     `;
@@ -67,6 +72,7 @@
       status.textContent = cal.summary(p);
       status.className = 'cal-status' + (p.isCalibrated ? ' ok' : '');
       if (p.isCalibrated && !input.value) input.value = String(p.measuredDbA);
+      syncTest();
     };
 
     const playBtn = el('button', { cls: 'cal-btn primary' }, '▶ Play calibration noise');
@@ -86,6 +92,54 @@
         alert(`Could not play ${cal.NOISE_URL}\n\n${e.message}`);
       }
     };
+
+    // ── Test level: confirm the output really is what the dial says ──
+    const testWrap = el('div', { cls: 'cal-test' });
+    const testSlider = el('input', { cls: 'cal-slider', type: 'range', step: String(cal.STEP_DB) });
+    const testLabel  = el('div', { cls: 'cal-test-level' }, '—');
+    const testBtn    = el('button', { cls: 'cal-btn' }, '▶ Test level');
+
+    const syncTest = () => {
+      const p = cal.profile();
+      testWrap.style.display = p.isCalibrated ? 'block' : 'none';
+      if (!p.isCalibrated) return;
+      testSlider.min = String(p.minLevel);
+      testSlider.max = String(p.maxLevel);
+      if (!testSlider.value || Number(testSlider.value) > p.maxLevel ||
+          Number(testSlider.value) < p.minLevel) {
+        testSlider.value = String(Math.min(65, p.maxLevel));
+      }
+      testLabel.textContent = `${cal.snapLevel(testSlider.value)} dB A`;
+    };
+
+    testSlider.oninput = () => {
+      const lvl = cal.snapLevel(testSlider.value);
+      testSlider.value = String(lvl);
+      testLabel.textContent = `${lvl} dB A`;
+      if (cal.isTestPlaying()) cal.startTest(lvl, 'binaural');   // retune live
+    };
+
+    testBtn.onclick = async () => {
+      if (cal.isTestPlaying()) {
+        cal.stopTest();
+        testBtn.textContent = '▶ Test level';
+        testBtn.className = 'cal-btn';
+        return;
+      }
+      try {
+        cal.prime();
+        await cal.startTest(cal.snapLevel(testSlider.value), 'binaural');
+        testBtn.textContent = '■ Stop';
+        testBtn.className = 'cal-btn playing';
+      } catch (e) { alert(e.message); }
+    };
+
+    testWrap.append(
+      el('div', { cls: 'cal-test-head' }, 'Test output level'),
+      el('div', { style: 'font-size:11.5px;color:#667;margin-bottom:8px' },
+         'Plays the noise through the normal presentation path at the level below. Measure it: the meter should read what the slider says.'),
+      testSlider, testLabel, el('div', { cls: 'cal-row' }, testBtn),
+    );
 
     const saveBtn = el('button', { cls: 'cal-btn primary' }, 'Save calibration');
     saveBtn.onclick = () => {
@@ -109,7 +163,7 @@
       if (typeof window.kttCalUI.onSaved === 'function') window.kttCalUI.onSaved(cal.profile());
     };
 
-    const close = () => { cal.stopNoise(); overlay.remove(); };
+    const close = () => { cal.stopNoise(); cal.stopTest(); overlay.remove(); };
     const closeBtn = el('button', { cls: 'cal-btn' }, 'Close');
     closeBtn.onclick = close;
     overlay.onclick = e => { if (e.target === overlay) close(); };
@@ -130,6 +184,7 @@
          el('label', { style: 'font-size:13px' }, 'Measured level:'), input,
          el('span', { style: 'font-size:13px;color:#666' }, 'dB A'), saveBtn),
       status,
+      testWrap,
       el('div', { cls: 'cal-row' }, clearBtn, el('div', { style: 'flex:1' }), closeBtn),
     );
 
