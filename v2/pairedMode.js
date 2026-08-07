@@ -107,19 +107,23 @@
 
   function primeMediaAudio() {
     try {
+      // Prime against silence, never a real asset: if a priming play fails to
+      // pause cleanly, whatever is loaded plays out loud.
+      const placeholder = window.kttCal ? window.kttCal.SILENT_WAV : CARRIER_URL;
       if (!respCarrier) {
-        respCarrier = new Audio(); respCarrier.preload = 'auto'; respCarrier.src = CARRIER_URL;
+        respCarrier = new Audio(); respCarrier.preload = 'auto'; respCarrier.src = placeholder;
       }
       if (!respKupuAud) {
-        respKupuAud = new Audio(); respKupuAud.preload = 'auto'; respKupuAud.src = CARRIER_URL;
+        respKupuAud = new Audio(); respKupuAud.preload = 'auto'; respKupuAud.src = placeholder;
       }
       // Silent play/pause inside the gesture is what unlocks each element.
       [respCarrier, respKupuAud].forEach(a => {
+        const settle = () => { try { a.pause(); a.currentTime = 0; } catch (_) {} a.muted = false; };
         a.muted = true;
         const p = a.play();
-        const settle = () => { try { a.pause(); a.currentTime = 0; } catch (_) {} a.muted = false; };
-        if (p && p.then) p.then(settle).catch(() => { a.muted = false; });
+        if (p && p.then) p.then(settle, settle);
         else settle();
+        setTimeout(settle, 400);
       });
       if (!_mediaPrimed) kttLog('🔊', 'Media elements primed for playback');
       _mediaPrimed = true;

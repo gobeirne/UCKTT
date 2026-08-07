@@ -26,6 +26,14 @@
   const STORAGE_KEY = 'kttCalibration';
   const NOISE_URL   = 'sounds/noise.mp3';
 
+  /* 40 ms of true digital silence, used as the placeholder src when priming the
+     media elements. It MUST be silent: priming plays each element to satisfy
+     the iOS gesture requirement, and if that play ever fails to be paused
+     cleanly, whatever is loaded will be heard at full level. A real asset here
+     (the calibration noise, say) turns a routine priming glitch into a blast of
+     noise in a child's ear. */
+  const SILENT_WAV = 'data:audio/wav;base64,UklGRqQCAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YYACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
   // noise.mp3 mean dB(A) − mean kupu momentary dB(A). Zero by construction for
   // the current sound set. Change here if the noise is ever re-rendered.
   const SPEECH_NOISE_OFFSET_DB = 0;
@@ -70,13 +78,20 @@
 
     ['carrier', 'kupu'].forEach(role => {
       const el = element(role);
+      // The element must be stopped whether play() resolves OR rejects. An
+      // interrupted play (AbortError is common on the first gesture, when both
+      // elements start at once) previously left it running and then unmuted it.
+      const settle = () => {
+        try { el.pause(); el.currentTime = 0; } catch (_) {}
+        el.muted = false;
+      };
       try {
         el.muted = true;
         const p = el.play();
-        const settle = () => { try { el.pause(); el.currentTime = 0; } catch (_) {} el.muted = false; };
-        if (p && p.then) p.then(settle).catch(() => { el.muted = false; });
+        if (p && p.then) p.then(settle, settle);
         else settle();
-      } catch (_) { el.muted = false; }
+        setTimeout(settle, 400);   // last resort if neither path fires
+      } catch (_) { settle(); }
     });
     log('primed — ctx:', ctx && ctx.state);
   }
@@ -127,7 +142,7 @@
     if (!els[role]) {
       const a = new Audio();
       a.preload = 'auto';
-      a.src = NOISE_URL;      // harmless placeholder so priming has something to play
+      a.src = SILENT_WAV;     // silent by construction — see SILENT_WAV above
       els[role] = a;
     }
     return els[role];
@@ -351,6 +366,6 @@
     gainForLevel, maxLevel, minLevel, snapLevel, unit,
     isCalibrated: () => cal.isCalibrated,
     profile, summary, onChange,
-    STEP_DB, SPEECH_NOISE_OFFSET_DB, NOISE_URL,
+    STEP_DB, SPEECH_NOISE_OFFSET_DB, NOISE_URL, SILENT_WAV,
   };
 })();
