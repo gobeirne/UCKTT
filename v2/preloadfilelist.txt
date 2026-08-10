@@ -25,7 +25,7 @@ Images/moko.png
 Images/motu.png
 Images/pahi.png
 Images/pai.png
-Images/paki.jpeg
+Images/paki.png
 Images/pāpā.png
 Images/pata.png
 Images/pere.png
