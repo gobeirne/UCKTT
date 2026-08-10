@@ -358,6 +358,45 @@
     [carrierAudio, kupuAudio].forEach(a => { if (a) { a.pause(); a.currentTime = 0; } });
   }
 
+  /* Playback indicator.
+     `where` is 'responder' or 'clinician'; null hides it. The responder reports
+     its own start and finish over the data channel, so what is shown is the
+     state of the device that is actually making the sound rather than an
+     optimistic local guess. If those reports stop arriving (channel drop, page
+     backgrounded) the watchdog clears the indicator rather than leaving a
+     "Playing" badge lit for a stimulus that is long over. */
+  let _audioLiveTimer = null;
+  function setAudioLive(where, detail) {
+    clearTimeout(_audioLiveTimer);
+    const box  = document.getElementById('mt-audio-live');
+    const text = document.getElementById('mt-audio-live-text');
+    if (!box) return;
+    if (!where) { box.classList.remove('on'); return; }
+    box.classList.add('on');
+    if (text) {
+      text.textContent = where === 'responder'
+        ? `Playing on responder${detail?.kupu ? ' — ' + detail.kupu : ''}`
+        : 'Playing on this device';
+    }
+    // Longest a presentation can legitimately run: carrier + kupu + slack.
+    _audioLiveTimer = setTimeout(() => {
+      box.classList.remove('on');
+      console.warn('[KTT] playback indicator timed out — no finish report from the responder');
+    }, 12000);
+  }
+
+  // Called by pairedMode.js when the responder reports its playback state.
+  function onRemoteAudio(state, data) {
+    if (state === 'start') setAudioLive('responder', data);
+    else setAudioLive(null);
+    const btn = document.getElementById('mt-play-btn');
+    if (btn) {
+      const busy = state === 'start';
+      btn.disabled    = busy || !armedKupu;
+      btn.textContent = busy ? 'Playing…' : '▶ Play';
+    }
+  }
+
   function playKupu(kupu) {
     if (!kupu) return;
     stopAudio();
@@ -393,25 +432,73 @@
 
     if (!responderPlays) {
       // Routed through the calibration module: gain set from this device's
-      // profile, ear routing applied, carrier then kupu at the same level.
-      window.kttCal.play('carrier', CARRIER_URL, { level: currentLevel, ear: currentEar })
-        .then(() => window.kttCal.play('kupu', `${AUDIO_DIR}/${encodeURIComponent(kupu)}.mp3`,
-                                       { level: currentLevel, ear: currentEar }))
-        .then(() => { if (btn) { btn.disabled = !armedKupu; btn.textContent = '▶ Play'; } });
+      // profile, ear routing applied, carrier then kupu as ONE presentation so
+      // the gate doesn't dip between the two clips.
+      setAudioLive('clinician', { kupu });
+      window.kttCal.playSequence([
+        { role: 'carrier', url: CARRIER_URL },
+        { role: 'kupu',    url: `${AUDIO_DIR}/${encodeURIComponent(kupu)}.mp3` },
+      ], { level: currentLevel, ear: currentEar, reason: `presentation:${kupu}` })
+        .then(() => {
+          setAudioLive(null);
+          if (btn) { btn.disabled = !armedKupu; btn.textContent = '▶ Play'; }
+        });
     } else {
-      if (btn) { btn.disabled = !armedKupu; btn.textContent = '▶ Play'; }
+      /* The responder is playing. Leave the button disabled and the indicator
+         lit until that device says it has finished — re-enabling here would
+         invite a second presentation on top of the first. onRemoteAudio()
+         releases both, and its watchdog releases them if the reports go quiet. */
+      setAudioLive('responder', { kupu });
+      if (btn) { btn.disabled = true; btn.textContent = 'Playing…'; }
     }
   }
 
   // ─── View switching ───────────────────────────────────────────────────────
 
+  /* Show/hide by class only. Setting `display: block` inline used to override
+     the stylesheet's `.active { display: flex }`, and every one of these views
+     is a flex column whose body is the scroll container: `flex: 1; min-height: 0;
+     overflow: auto` does nothing inside a block parent, so the body took its full
+     content height, overflowed the parent's `height: 100dvh; overflow: hidden`,
+     and was simply clipped. That is why neither the setup nor the test screen
+     would scroll. Leave display to CSS. */
   function showView(id) {
     ['settingsView', 'testView', 'manualSetupView', 'manualTestView'].forEach(v => {
       const e = document.getElementById(v);
       if (e) { e.classList.remove('active'); e.style.display = 'none'; }
     });
     const target = document.getElementById(id);
-    if (target) { target.classList.add('active'); target.style.display = 'block'; }
+    if (target) { target.classList.add('active'); target.style.display = ''; }
+  }
+
+  /* `window.kttLogViewer?.open()` is exactly the wrong shape for a button: if
+     logViewer.js failed to load — a 404, a bad deploy, a stale cache entry —
+     the optional chain evaluates to undefined and the button does nothing at
+     all, with no error anywhere. (The Debug log button next to it kept working
+     because it is defined inline in index.html.) So: try the module, try to
+     fetch it once if it is missing, and if that fails, say so out loud. */
+  let _logViewerLoading = null;
+  function openLogViewer() {
+    if (window.kttLogViewer?.open) { window.kttLogViewer.open(); return; }
+    if (!_logViewerLoading) {
+      _logViewerLoading = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'logViewer.js?reload=' + Date.now();
+        s.onload  = resolve;
+        s.onerror = () => reject(new Error('logViewer.js could not be loaded'));
+        document.head.appendChild(s);
+      });
+    }
+    _logViewerLoading.then(() => {
+      if (window.kttLogViewer?.open) window.kttLogViewer.open();
+      else alert('logViewer.js loaded but did not register — see the debug log.');
+    }).catch(err => {
+      _logViewerLoading = null;
+      console.error('[KTT] Logs unavailable:', err.message);
+      alert('The log viewer could not be loaded.\n\n' + err.message +
+            '\n\nCheck that logViewer.js is deployed alongside index.html. ' +
+            'The 🐛 Debug log button still works in the meantime.');
+    });
   }
 
   // ─── DOM helpers ──────────────────────────────────────────────────────────
@@ -497,7 +584,7 @@
     headerRight.appendChild(el('button', { cls: 'mt-btn',
       style: 'font-size:11px',
       title: 'Clinician, responder and interleaved logs for this session',
-      onclick: () => window.kttLogViewer?.open()
+      onclick: () => openLogViewer()
     }, '📋 Logs'));
     headerRight.appendChild(el('button', { cls: 'mt-btn',
       style: 'font-size:11px',
@@ -944,7 +1031,14 @@
     currentSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     currentLevel     = DEFAULT_LEVEL;
     const S = loadSettings();
-    if (S.lastLevel) currentLevel = parseInt(S.lastLevel) || DEFAULT_LEVEL;
+    /* Only reuse the saved level if it was recorded in the unit now in force.
+       dB A and dB FS are different scales on the same dial — carrying 65 from a
+       calibrated session into an uncalibrated one asks for 65 dB FS, which is
+       above the 0 dB ceiling, so the dial pins to the top and looks stuck. */
+    if (S.lastLevel && (!S.lastLevelUnit || S.lastLevelUnit === levelBounds().unit)) {
+      currentLevel = parseInt(S.lastLevel) || DEFAULT_LEVEL;
+    }
+    currentLevel = clampLevel(currentLevel);
     if (S.lastEar) currentEar = S.lastEar;
     if (S.labelMode) labelMode = S.labelMode;
     else if (S.showLabels !== undefined) labelMode = S.showLabels ? 'both' : 'off';
@@ -1022,7 +1116,7 @@
 
     infoBar.appendChild(el('button', { cls: 'mt-btn', style: 'font-size:11px;padding:3px 8px',
       title: 'Session logs — this device, the child\u2019s device, and both interleaved',
-      onclick: () => window.kttLogViewer?.open() }, '📋 Logs'));
+      onclick: () => openLogViewer() }, '📋 Logs'));
 
     // Audio source toggle (only visible when paired)
     if (window.kttPaired?.isConnected()) {
@@ -1093,12 +1187,12 @@
 
     const bounds = levelBounds();
 
-    const minusBtn = el('button', { cls: 'mt-level-btn', onclick: () => adjustLevel(-LEVEL_STEP) }, '−5');
+    const minusBtn = el('button', { cls: 'mt-level-btn', id: 'mt-level-minus',
+      onclick: () => adjustLevel(-LEVEL_STEP) }, '−5');
     const levelDisp = el('div', { cls: 'mt-level-disp', id: 'mt-level-disp' },
       `${currentLevel} ${bounds.unit}`);
-    const plusBtn  = el('button', { cls: 'mt-level-btn', onclick: () => adjustLevel(+LEVEL_STEP) }, '+5');
-    if (currentLevel <= bounds.min) minusBtn.disabled = true;
-    if (currentLevel >= bounds.max) plusBtn.disabled  = true;
+    const plusBtn  = el('button', { cls: 'mt-level-btn', id: 'mt-level-plus',
+      onclick: () => adjustLevel(+LEVEL_STEP) }, '+5');
 
     const manualWrap = el('div', { cls: 'mt-manual-wrap' });
     const manualInp  = el('input', { cls: 'mt-manual-level', id: 'mt-manual-level',
@@ -1132,6 +1226,14 @@
         : `${activeDeviceName()} is NOT calibrated — the level control is a dB FS attenuator, not dB A.`
     }, bounds.calibrated ? `Calibrated · ${activeDeviceName()}` : `UNCALIBRATED · ${activeDeviceName()}`);
 
+    /* Live playback indicator. When the responder is the audio source the
+       clinician otherwise gets no feedback at all — sendPlay() returns
+       immediately and the Play button re-enables while the child is still
+       listening. This lights up from the responder's own start/finish reports,
+       so it reflects what that device is actually doing, not what we asked for. */
+    const audioLive = el('div', { cls: 'mt-audio-live', id: 'mt-audio-live' },
+      el('span', { cls: 'mt-audio-dot' }), el('span', { id: 'mt-audio-live-text' }, 'Playing'));
+
     const spacer = el('div', { style: 'flex:1' });
 
     const armedLbl = el('div', { cls: 'mt-armed-label', id: 'mt-armed-label' },
@@ -1148,7 +1250,10 @@
     }, '⊘ No response');
     if (!armedKupu) nrBtn.disabled = true;
 
-    bar.append(minusBtn, levelDisp, plusBtn, manualWrap, earWrap, calBadge, spacer, armedLbl, nrBtn, playBtn);
+    bar.append(minusBtn, levelDisp, plusBtn, manualWrap, earWrap, calBadge, audioLive,
+               spacer, armedLbl, nrBtn, playBtn);
+    // Rails are computed in one place; the bar just gets its initial state here.
+    setTimeout(refreshLevelControls, 0);
     return bar;
   }
 
@@ -1377,15 +1482,34 @@
                             `Level ${currentLevel} → ${n}`);
     }
     currentLevel = n;
-    saveSettings({ lastLevel: n });
+    saveSettings({ lastLevel: n, lastLevelUnit: levelBounds().unit });
+    refreshLevelControls();
+    refreshScoringTable();
+  }
+
+  /* The +/− buttons' disabled state used to be decided once, when the level bar
+     was rendered, and never touched again — so if the bar happened to be built
+     with the level sitting on a rail, that button stayed dead for the rest of
+     the session. Uncalibrated made it obvious, because the dB FS ceiling is 0
+     and the level starts there: "+5" rendered disabled, you could walk down to
+     −60 and then nothing moved at all. Rail state has to be recomputed every
+     time the level or the bounds change. */
+  function refreshLevelControls() {
+    const b = levelBounds();
     const disp   = document.getElementById('mt-level-disp');
     const big    = document.getElementById('mt-level-big');
     const manual = document.getElementById('mt-manual-level');
-    const b = levelBounds();
-    if (disp)   disp.textContent   = `${n} ${b.unit}`;
-    if (big)    big.textContent    = String(n);
-    if (manual) manual.value       = String(n);
-    refreshScoringTable();
+    const minus  = document.getElementById('mt-level-minus');
+    const plus   = document.getElementById('mt-level-plus');
+    if (disp)   disp.textContent = `${currentLevel} ${b.unit}`;
+    if (big)    big.textContent  = String(currentLevel);
+    if (manual) {
+      if (document.activeElement !== manual) manual.value = String(currentLevel);
+      manual.min = String(b.min);
+      manual.max = String(b.max);
+    }
+    if (minus) minus.disabled = currentLevel <= b.min;
+    if (plus)  plus.disabled  = currentLevel >= b.max;
   }
 
   // ─── Peer response handling ───────────────────────────────────────────────
@@ -2296,6 +2420,7 @@ ${lvls.length ? `
 
   window.kttManual = { rebuildAllLists, renderSetupScreen, showView,
     onPairResponse, onPairReady, onPairResponderWaiting, onResponderCal,
+    onRemoteAudio,
     getActiveListForPair, getShowLabels: () => childLabelsOn(),
     isTestActive: () => {
       const v = document.getElementById('manualTestView');

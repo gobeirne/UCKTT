@@ -31,19 +31,54 @@
   const NOISE_CANDIDATES = ['sounds/noise.wav', 'sounds/noise.mp3'];
   let   NOISE_URL   = NOISE_CANDIDATES[1];   // resolved on first use
 
-  /* 40 ms of true digital silence, used as the placeholder src when priming the
-     media elements. It MUST be silent: priming plays each element to satisfy
-     the iOS gesture requirement, and if that play ever fails to be paused
-     cleanly, whatever is loaded will be heard at full level. A real asset here
-     (the calibration noise, say) turns a routine priming glitch into a blast of
-     noise in a child's ear. */
-  const SILENT_WAV = 'data:audio/wav;base64,UklGRqQCAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YYACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  /* Silence used as the placeholder src when priming the media elements. It
+     MUST be silent: priming plays each element to satisfy the iOS gesture
+     requirement, and if that play ever fails to be paused cleanly, whatever is
+     loaded will be heard at full level. A real asset here (the calibration
+     noise, say) turns a routine priming glitch into a blast of noise in a
+     child's ear.
+
+     It must ALSO be at the same sample rate as the real assets. Safari fixes a
+     MediaElementAudioSourceNode's resampling ratio from the media that is
+     loaded when the node is created, and graphFor() runs during priming — so a
+     placeholder at a different rate makes every later clip play at the wrong
+     speed through that node. The old placeholder was 8 kHz against 48 kHz
+     assets, which is exactly the kind of mismatch that produces the wrong
+     playback speed rather than an error. */
+  const ASSET_SAMPLE_RATE = 48000;   // the kupu/carrier/noise are 48 kHz mp3
+
+  function silentWavURL(rate, seconds) {
+    const n = Math.round(rate * seconds), dataLen = n * 2;
+    const b = new ArrayBuffer(44 + dataLen), v = new DataView(b);
+    const put = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+    put(0, 'RIFF');  v.setUint32(4, 36 + dataLen, true);  put(8, 'WAVE');
+    put(12, 'fmt '); v.setUint32(16, 16, true);           v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true);       v.setUint32(24, rate, true);
+    v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    put(36, 'data'); v.setUint32(40, dataLen, true);      // samples stay zero = silence
+    return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+  }
+
+  let SILENT_WAV = null;   // built lazily; blob: URL, 100 ms, ASSET_SAMPLE_RATE
+  function silentSrc() {
+    if (!SILENT_WAV) {
+      try { SILENT_WAV = silentWavURL(ASSET_SAMPLE_RATE, 0.1); }
+      catch (e) { warn('silent placeholder build failed:', e.message); SILENT_WAV = ''; }
+    }
+    return SILENT_WAV;
+  }
 
   // noise.mp3 mean dB(A) − mean kupu momentary dB(A). Zero by construction for
   // the current sound set. Change here if the noise is ever re-rendered.
   const SPEECH_NOISE_OFFSET_DB = 0;
 
   const GATE_RAMP_MS  = 8;     // short ramp so opening/closing the gate doesn't click
+  /* How long the gate stays at unity after the last holder releases. Covers
+     both the early `ended` event and the carrier→kupu handover. Long enough to
+     stop the clipping, far too short to be a safety hole. */
+  const GATE_LINGER_MS = 120;
+  /* Slack added to a clip's measured duration before the backstop fires. */
+  const END_GRACE_MS   = 350;
   const MAX_GATE_MS   = 15000; // ceiling for a single stimulus presentation
   /* Sustained sources — the calibration noise and the test tone — are held open
      deliberately by a clinician with a visible Stop button in front of them, and
@@ -61,6 +96,7 @@
   let master  = null;          // every sound-producing path terminates here
   let gateHolders = 0;         // >0 = a deliberate presentation is in progress
   let gateWatchdog = null;
+  let gateLinger   = null;     // pending ramp-down, cancelled if the gate re-opens
   let gateDeadline = 0;
   let cal     = { measuredDbA: null, timestamp: null, isCalibrated: false };
   let calNode = null;                 // looping calibration noise source (unity)
@@ -69,6 +105,8 @@
   let testGate = null;
   let noiseBuffer = null;
   const els    = {};                  // role → HTMLAudioElement
+  const primeGen = {};                // role → generation, invalidates stale primes
+  const inFlight = new Set();         // unsettled play() completions
   const graphs = new WeakMap();       // element → { source, gain, ear }
   const listeners = [];
 
@@ -88,13 +126,53 @@
      so "we remembered to pause it" is not a strong enough property. */
   function ensureCtx() {
     if (!ctx) {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      /* The audio session type has to be set BEFORE the context is constructed,
+         not after: on iOS it is the session category in force at construction
+         that decides the hardware rate and whether the Ring/Silent switch mutes
+         us. prime() also sets it, but prime() is not always the first thing to
+         touch the context. */
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (_) {}
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      /* Ask for the rate the assets are rendered at. When the context and the
+         media agree, no resampling happens on the media-element path — which is
+         where Safari gets the ratio wrong. If the browser refuses the hint we
+         still get a context; the rate is logged either way so a mismatch shows
+         up in the session log rather than as "it sounded odd". */
+      try { ctx = new Ctor({ sampleRate: ASSET_SAMPLE_RATE }); }
+      catch (_) { ctx = new Ctor(); }
       master = ctx.createGain();
       master.gain.value = 0;
       master.connect(ctx.destination);
+      log(`AudioContext ${ctx.sampleRate} Hz (assets ${ASSET_SAMPLE_RATE} Hz)` +
+          (ctx.sampleRate === ASSET_SAMPLE_RATE ? '' : ' — RATE MISMATCH'));
+      if (ctx.sampleRate !== ASSET_SAMPLE_RATE) {
+        const ratio = ASSET_SAMPLE_RATE / ctx.sampleRate;
+        warn(`context is ${ctx.sampleRate} Hz but assets are ${ASSET_SAMPLE_RATE} Hz` +
+             (Math.abs(ratio - 2) < 0.01
+               ? ' — exactly half. This is the 50%-speed playback signature: iOS ' +
+                 'hands out a 24 kHz context when the audio session is not in ' +
+                 '"playback" at construction time.'
+               : '; if playback sounds slow or fast, this is why'));
+        window.kttLogs?.event('audio-rate-mismatch',
+          { contextRate: ctx.sampleRate, assetRate: ASSET_SAMPLE_RATE, ratio },
+          'AudioContext sample rate does not match the assets');
+      }
     }
     if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     return ctx;
+  }
+
+  function audioInfo() {
+    return {
+      contextRate: ctx ? ctx.sampleRate : null,
+      assetRate: ASSET_SAMPLE_RATE,
+      state: ctx ? ctx.state : 'none',
+      gateHolders,
+      elements: Object.keys(els).map(r => ({
+        role: r, src: (els[r].src || '').split('/').pop(),
+        rate: els[r].playbackRate, paused: els[r].paused,
+      })),
+    };
   }
 
   function output() { ensureCtx(); return master; }
@@ -117,9 +195,13 @@
   function openGate(reason, opts) {
     ensureCtx();
     const maxMs = (opts && opts.maxMs) || MAX_GATE_MS;
+    const relingering = gateLinger !== null;
+    clearTimeout(gateLinger); gateLinger = null;   // re-opened inside the linger
     gateHolders++;
     if (gateHolders === 1) {
-      rampTo(1, GATE_RAMP_MS);
+      // Already at unity if we caught the linger — don't re-ramp, that is the
+      // gap between carrier and kupu we are trying to close.
+      if (!relingering) rampTo(1, GATE_RAMP_MS);
       window.kttLogs?.event('gate-open', { reason, maxMs }, `Audio gate opened: ${reason}`);
     }
     // The watchdog tracks the longest-lived holder, so a short stimulus opening
@@ -133,6 +215,18 @@
     return { reason, released: false };
   }
 
+  /* Closing the gate the instant the last holder releases shaves the tail off
+     every clip: `ended` fires when the media element has reached its duration,
+     which is a frame or two before the final samples have actually made it
+     through the graph to the hardware. So the last release schedules the
+     ramp-down rather than performing it, and any openGate() inside the window
+     cancels it.
+
+     Safety is unaffected. The hold is under a fifth of a second, nothing is
+     playing during it (the source has ended or been paused), forceCloseGate()
+     still slams shut immediately, and the watchdog is untouched. What this is
+     NOT for is sequencing — use playSequence() to keep the gate open across the
+     clips of one presentation. */
   function closeGate(token) {
     if (!token || token.released) return;
     token.released = true;
@@ -140,7 +234,11 @@
     if (gateHolders === 0) {
       clearTimeout(gateWatchdog);
       gateDeadline = 0;
-      rampTo(0, GATE_RAMP_MS * 2);
+      clearTimeout(gateLinger);
+      gateLinger = setTimeout(() => {
+        gateLinger = null;
+        if (gateHolders === 0) rampTo(0, GATE_RAMP_MS * 2);
+      }, GATE_LINGER_MS);
     }
   }
 
@@ -149,6 +247,7 @@
     gateHolders = 0;
     gateDeadline = 0;
     clearTimeout(gateWatchdog);
+    clearTimeout(gateLinger); gateLinger = null;
     if (master) { try { master.gain.cancelScheduledValues(ctx.currentTime); } catch (_) {} master.gain.value = 0; }
     window.kttLogs?.event('gate-close', { why }, `Audio gate forced shut: ${why}`);
   }
@@ -175,10 +274,19 @@
       // (closed) master gate rather than straight out of the element. Combined
       // with the silent placeholder, priming is inaudible two ways over.
       try { graphFor(el); } catch (e) { warn('graph build failed during prime:', e.message); }
-      // The element must be stopped whether play() resolves OR rejects. An
-      // interrupted play (AbortError is common on the first gesture, when both
-      // elements start at once) previously left it running and then unmuted it.
+
+      /* Every settle path is stamped with the generation it belongs to, and
+         play() bumps the generation. Without that, the 400 ms backstop below
+         belonged to nobody in particular: prime() is called from unlockAudio()
+         and from the calibration dialog's Test button, both of which start a
+         real presentation in the same tick — so 400 ms later the backstop
+         paused the clip that had just started. That is why "play through the
+         stimulus player" produced nothing audible, and why a responder that had
+         just been woken by the tap prompt lost the end of its carrier. */
+      primeGen[role] = (primeGen[role] || 0) + 1;
+      const gen = primeGen[role];
       const settle = () => {
+        if (primeGen[role] !== gen) return;   // superseded by a real play()
         try { el.pause(); el.currentTime = 0; } catch (_) {}
         el.muted = false;
       };
@@ -190,7 +298,7 @@
         setTimeout(settle, 400);   // last resort if neither path fires
       } catch (_) { settle(); }
     });
-    log('primed — ctx:', ctx && ctx.state);
+    log('primed — ctx:', ctx && ctx.state, '@', ctx && ctx.sampleRate, 'Hz');
   }
 
   // ─── Routing ──────────────────────────────────────────────────────────────
@@ -239,7 +347,7 @@
     if (!els[role]) {
       const a = new Audio();
       a.preload = 'auto';
-      a.src = SILENT_WAV;     // silent by construction — see SILENT_WAV above
+      a.src = silentSrc();    // silent by construction — see silentWavURL above
       els[role] = a;
     }
     return els[role];
@@ -304,24 +412,60 @@
         if (settled) return;
         settled = true;
         clearTimeout(watchdog);
+        inFlight.delete(done);
         closeGate(gate);
-        el.onended = el.onerror = null;
+        el.onended = el.onerror = el.onloadedmetadata = null;
         resolve(ok);
       };
+      /* A looped play (the calibration dialog's "via the stimulus player" test)
+         is stopped by stopAll(), not by the clip ending — so without this its
+         promise never settles and its gate token is released only when the
+         20-minute watchdog fires, by which time it decrements a holder that
+         belongs to somebody else's presentation. */
+      inFlight.add(done);
       try {
+        // Supersede any pending prime settle for this element (see prime()).
+        primeGen[role] = (primeGen[role] || 0) + 1;
         const g = graphFor(el);
         g.gain.gain.value = gainForLevel(o.level);
         g.ear.setEar(o.ear || 'binaural');
+        el.muted = false;
+        el.playbackRate = 1;
 
         el.loop = !!o.loop;
         el.onended = () => { if (!el.loop) done(true); };
         el.onerror = () => { warn('media error:', url); done(false); };
+
+        /* `ended` is the normal completion path, but it is not guaranteed — a
+           stalled decode or a context whose clock has frozen leaves it silent.
+           Until the metadata arrives we don't know how long the clip is, so the
+           backstop starts at the flat ceiling and then tightens to the clip's
+           real duration the moment we can measure it. That way a missed `ended`
+           costs a few hundred milliseconds of dead air instead of the full
+           MAX_CLIP_MS, which mid-test is the difference between a hiccup and a
+           clinician wondering whether the app has hung. */
+        const armWatchdog = ms => {
+          clearTimeout(watchdog);
+          watchdog = setTimeout(() => {
+            warn(`watchdog fired for ${url} after ${Math.round(ms)} ms`);
+            done(true);
+          }, ms);
+        };
+        el.onloadedmetadata = () => {
+          if (settled || el.loop) return;
+          const d = Number(el.duration);
+          if (isFinite(d) && d > 0) armWatchdog(d * 1000 + END_GRACE_MS);
+        };
+
         if (!el.src.endsWith(url)) el.src = url;
         el.currentTime = 0;
-        // A looped test tone is stopped by the clinician, not by the clip ending,
-        // so it gets the sustained ceiling rather than the stimulus one.
-        watchdog = setTimeout(() => { warn('watchdog fired for', url); done(true); },
-                              o.loop ? MAX_SUSTAINED_MS : MAX_CLIP_MS);
+        // A looped test tone is stopped by the clinician, not by the clip
+        // ending, so it gets the sustained ceiling rather than the stimulus one.
+        armWatchdog(o.loop ? MAX_SUSTAINED_MS : MAX_CLIP_MS);
+        // Metadata may already be present when the src is unchanged from last time.
+        if (!o.loop && el.readyState >= 1 && isFinite(el.duration) && el.duration > 0) {
+          armWatchdog(el.duration * 1000 + END_GRACE_MS);
+        }
         const p = el.play();
         if (p && p.catch) p.catch(err => { warn('play rejected:', err.message); done(false); });
       } catch (e) {
@@ -331,10 +475,40 @@
     });
   }
 
+  /* Play several clips as ONE presentation.
+     The gate is a safety interlock, not a sequencer, and using it as both is
+     what chopped the audio: carrier and kupu are two play() calls, each opening
+     and closing the gate, so it ramped to zero and back up in the gap between
+     them. Holding a single token across the whole sequence removes the gap by
+     construction, and each clip's own token still nests inside it harmlessly
+     because the count never reaches zero mid-presentation.
+
+     `items` is [{ role, url }, …]; they play in order at one level and ear. */
+  async function playSequence(items, opts) {
+    const o = opts || {};
+    const list = (items || []).filter(Boolean);
+    if (!list.length) return false;
+    // Ceiling for the whole sequence, not per clip.
+    const token = openGate(o.reason || 'presentation',
+                           { maxMs: Math.min(MAX_GATE_MS * list.length, MAX_SUSTAINED_MS) });
+    try {
+      let ok = true;
+      for (const it of list) {
+        const got = await play(it.role, it.url, { level: o.level, ear: o.ear });
+        ok = ok && got;
+      }
+      return ok;
+    } finally {
+      closeGate(token);
+    }
+  }
+
   // Panic stop: shut the gate first (instant silence regardless of what is
   // running), then tidy up the sources behind it.
   function stopAll() {
     forceCloseGate('stopAll');
+    Array.from(inFlight).forEach(done => { try { done(false); } catch (_) {} });
+    inFlight.clear();
     Object.values(els).forEach(a => { try { a.pause(); a.loop = false; a.currentTime = 0; } catch (_) {} });
     if (testNode) { try { testNode.stop(); } catch (_) {} testNode = null; }
     if (calNode)  { try { calNode.stop();  } catch (_) {} calNode  = null; }
@@ -500,8 +674,8 @@
   load();
 
   window.kttCal = {
-    prime, ensureCtx,
-    play, stopAll,
+    prime, ensureCtx, output,
+    play, playSequence, stopAll,
     startNoise, stopNoise, isNoisePlaying,
     startTest, stopTest, isTestPlaying,
     applyLevel, clear,
@@ -510,7 +684,9 @@
     profile, summary, onChange,
     openGate, closeGate, forceCloseGate, gateIsOpen,
     loadNoise, noiseURL: () => NOISE_URL,
-    STEP_DB, SPEECH_NOISE_OFFSET_DB, SILENT_WAV,
+    audioInfo,
+    STEP_DB, SPEECH_NOISE_OFFSET_DB, silentSrc,
+    ASSET_SAMPLE_RATE, GATE_LINGER_MS,
     MAX_GATE_MS, MAX_SUSTAINED_MS, NOISE_CANDIDATES,
   };
 })();

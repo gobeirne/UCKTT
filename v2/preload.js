@@ -114,19 +114,27 @@
     if (failed) warn(`preload finished with ${failed} failure(s):`, failures.slice(0, 12));
     log(`preloaded ${done - failed}/${total} assets in ${secs}s`);
 
-    try { localStorage.setItem(DONE_KEY, String(o.version || '')); } catch (_) {}
+    try {
+      localStorage.setItem(DONE_KEY, JSON.stringify({
+        version: String(o.version || ''), at: new Date().toISOString(),
+        total, failed,
+      }));
+    } catch (_) {}
     running = false;
     const result = { total, done, failed, failures, seconds: Number(secs) };
     emit({ phase: 'done', ...result });
     return result;
   }
 
-  // Fire once per app version, after the page has settled, so a fresh install
-  // or a deploy warms itself without anyone having to remember.
+  /* Runs on every load. The whole set is a few MB and the service worker serves
+     the media cache-first, so a repeat run is a cache walk rather than a
+     download — while the version-gated behaviour it replaced meant a device that
+     had preloaded once never picked up assets added by a later deploy. Kept on
+     the idle callback so it never competes with first paint.
+
+     `version` is now recorded rather than used as a gate; kttPreloadedVersion
+     is a diagnostic ("what did this device last warm, and when"). */
   function autoRun(version) {
-    let seen = null;
-    try { seen = localStorage.getItem(DONE_KEY); } catch (_) {}
-    if (seen === String(version)) return;
     const start = () => run({ version });
     if ('requestIdleCallback' in window) requestIdleCallback(start, { timeout: 4000 });
     else setTimeout(start, 2500);

@@ -40,6 +40,8 @@
     #calLine { font-size: 11.5px; color: #667; max-width: 320px; line-height: 1.45; }
     #calLine.ok { color: #2d7010; }
     #calLine.bad { color: #a02020; font-weight: 600; }
+    #preLine { font-size: 11.5px; color: #667; max-width: 320px; line-height: 1.45; }
+    #preLine.bad { color: #a02020; font-weight: 600; }
     .foot { position: fixed; bottom: 10px; font-size: 10px; color: #99a; }
   </style>
 </head>
@@ -54,6 +56,7 @@
     <button class="big" id="pairBtn">Pair with clinician</button>
     <button class="sub-btn" id="calBtn">🎚 Calibrate this device</button>
     <div id="calLine"></div>
+    <div id="preLine" style="display:none"></div>
   </div>
 
   <div class="foot" id="verFoot"></div>
@@ -88,17 +91,49 @@
       // is bounded correctly the moment it happens, not just at pairing.
       window.kttCalUI.onSaved = () => {
         refreshCal();
-      if (window.kttPreload) window.kttPreload.autoRun('responder');
         if (window.kttPaired?.sendCal) window.kttPaired.sendCal();
       };
 
       document.getElementById('calBtn').onclick = () => window.kttCalUI.open();
       document.getElementById('pairBtn').onclick = () => {
         window.kttCal.prime();          // unlock audio inside a real gesture
+        // This device is the responder — it does not need to be asked which
+        // half it is. openPairModal('responder') skips the role picker and goes
+        // straight to the code-entry screen.
         window.kttPaired.openPairModal('responder');
       };
 
       refreshCal();
+
+      /* Warm the asset cache on load. This used to sit inside onSaved(), so it
+         only ran when somebody saved or cleared a calibration — an already
+         calibrated responder preloaded nothing, ever. It also passed the string
+         'responder' as the version, which the old version-gate then treated as
+         "already done" forever. It is the device most likely to be on a slow
+         connection and the one that must not stall mid-test, so it gets a
+         visible progress line rather than running silently. */
+      const preLine = document.getElementById('preLine');
+      if (window.kttPreload) {
+        window.kttPreload.onProgress(st => {
+          if (st.phase === 'start' || st.phase === 'progress') {
+            preLine.style.display = 'block';
+            preLine.className = '';
+            preLine.textContent = `Loading pictures and sounds… ${st.done}/${st.total}`;
+          } else if (st.phase === 'done') {
+            preLine.style.display = st.failed ? 'block' : 'none';
+            if (st.failed) {
+              preLine.className = 'bad';
+              preLine.textContent = `${st.failed} of ${st.total} assets failed to load — ` +
+                                    'some kupu may not work offline.';
+            }
+          } else if (st.phase === 'error') {
+            preLine.style.display = 'block';
+            preLine.className = 'bad';
+            preLine.textContent = 'Could not read the asset list: ' + st.message;
+          }
+        });
+        window.kttPreload.autoRun(window.KTT_APP_VERSION || 'responder');
+      }
 
       if (window.kttPaired?.init) window.kttPaired.init();
 

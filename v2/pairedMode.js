@@ -76,19 +76,30 @@
         if (navigator.audioSession) navigator.audioSession.type = 'playback';
       } catch (_) {}
 
-      if (!_audioCtx) {
+      /* Use calibration.js's context, never a second one. Two AudioContexts on
+         iOS is asking for trouble: the first one constructed establishes the
+         hardware session, so a bare `new AudioContext()` here could hand the
+         whole app a 24 kHz context — against 48 kHz assets, that is the
+         half-speed playback. calibration.js sets the session type before
+         constructing and asks for the asset rate; deferring to it means there
+         is one context, created one way. */
+      if (window.kttCal?.ensureCtx) {
+        _audioCtx = window.kttCal.ensureCtx();
+      } else if (!_audioCtx) {
         _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       }
       // Play a silent buffer to satisfy the iOS gesture requirement.
-      const buf = _audioCtx.createBuffer(1, 1, 22050);
+      const buf = _audioCtx.createBuffer(1, 1, _audioCtx.sampleRate);
       const src = _audioCtx.createBufferSource();
       src.buffer = buf;
-      src.connect(_audioCtx.destination);
+      // Through the master gate where one exists, so priming cannot make sound.
+      src.connect(window.kttCal?.output ? window.kttCal.output() : _audioCtx.destination);
       src.start(0);
       // Always try to resume — after a lock/background the context is SUSPENDED
       // but non-null, so an early return here would leave audio dead.
       if (_audioCtx.state === 'suspended') _audioCtx.resume();
-      kttLog('🔊', 'AudioContext unlocked/resumed, state:', _audioCtx.state);
+      kttLog('🔊', 'AudioContext unlocked/resumed, state:', _audioCtx.state,
+             '@', _audioCtx.sampleRate, 'Hz');
     } catch (e) {
       kttWarn('🔊', 'AudioContext unlock failed:', e.message);
     }
@@ -109,7 +120,10 @@
     try {
       // Prime against silence, never a real asset: if a priming play fails to
       // pause cleanly, whatever is loaded plays out loud.
-      const placeholder = window.kttCal ? window.kttCal.SILENT_WAV : CARRIER_URL;
+      // Never fall back to a real asset here: if a priming play fails to pause
+      // cleanly, whatever is loaded plays out loud, ungated, into a child's ear.
+      const placeholder = window.kttCal?.silentSrc ? window.kttCal.silentSrc() : null;
+      if (!placeholder) { kttWarn('🔊', 'no silent placeholder — skipping media prime'); return; }
       if (!respCarrier) {
         respCarrier = new Audio(); respCarrier.preload = 'auto'; respCarrier.src = placeholder;
       }
@@ -186,13 +200,33 @@
         .then(decoded => {
           const src = _audioCtx.createBufferSource();
           src.buffer = decoded;
-          src.connect(_audioCtx.destination);
+          /* Through the master gate where one exists. This is a last-resort
+             path, but "last resort" is not a licence to bypass the interlock
+             and put uncontrolled full-level audio into a child's ear — and now
+             that _audioCtx IS calibration.js's context, connecting straight to
+             .destination would do exactly that. It also needs a gate token, or
+             the gain sits at zero and the fallback is silent. */
+          const gated = !!window.kttCal?.output;
+          let token = null;
+          if (gated) {
+            src.connect(window.kttCal.output());
+            token = window.kttCal.openGate('fallback:playAudioIOS',
+                                           { maxMs: decoded.duration * 1000 + 1500 });
+          } else {
+            kttWarn('🎵', 'UNGATED FALLBACK — no master gate available');
+            src.connect(_audioCtx.destination);
+          }
           _respSource = src;
           // iOS can report state 'running' while the audio session is actually
           // interrupted: the clock freezes and 'onended' never fires. Guard with
           // a timer set from the real clip duration.
           let settled = false;
-          const finish = () => { if (!settled) { settled = true; resolve(); } };
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (token) window.kttCal.closeGate(token);
+            resolve();
+          };
           src.onended = finish;
           setTimeout(finish, decoded.duration * 1000 + 400);
           src.start(0);
@@ -204,10 +238,13 @@
   // Carrier phrase then kupu. Always resolves so the caller can arm the grid.
   async function playPresentation(carrierURL, kupuURL, level, ear) {
     // Preferred path: routed through calibration.js so this device's own
-    // profile sets the gain and the requested ear is honoured.
-    if (window.kttCal) {
-      await window.kttCal.play('carrier', carrierURL, { level, ear });
-      await window.kttCal.play('kupu',    kupuURL,    { level, ear });
+    // profile sets the gain and the requested ear is honoured. One gate token
+    // spans carrier + kupu, so the gate cannot dip in the gap between them.
+    if (window.kttCal?.playSequence) {
+      await window.kttCal.playSequence([
+        { role: 'carrier', url: carrierURL },
+        { role: 'kupu',    url: kupuURL },
+      ], { level, ear, reason: 'presentation:responder' });
       return;
     }
     // Fallback only. These elements are NOT routed through the master gate, so
@@ -240,6 +277,7 @@
     getAudioFromResponder:() => audioFromResponder,
     getResponderCal:      () => responderCal,
     sendCal,
+    sendAudioState,
     sendLogBatch,
     measureClockSkew,
     sendPlay,
@@ -435,15 +473,11 @@
       await fb.setDoc(fb.doc(fb.db, FB_BEACON_COLL, replyId), { ts: fb.ts(), status: 'ready', app: 'ktt' });
       fb.deleteDoc(fb.doc(fb.db, FB_BEACON_COLL, beaconId)).catch(() => {});
 
+      // openAs() rather than hunting for a button by its label: the label is a
+      // configurable attribute, so text-matching breaks the moment it changes.
       kttLog('📡', 'Reply sent — auto-opening pairing modal in responder mode');
-      pairEl.open();
-      await new Promise(r => setTimeout(r, 300));
-      document.querySelectorAll('.rp-modal button').forEach(b => {
-        if (b.textContent.trim() === 'Responder device') {
-          kttLog('📡', 'Auto-clicking Responder device button');
-          b.click();
-        }
-      });
+      appendPairEl();
+      if (pairEl.openAs) pairEl.openAs('responder'); else pairEl.open();
 
     } catch (err) {
       kttWarn('📡', 'Responder beacon check error:', err.message);
@@ -505,6 +539,7 @@
     pairEl.on('ktt-log',         onKttLog);
     pairEl.on('ktt-ping',        onKttPing);
     pairEl.on('ktt-pong',        onKttPong);
+    pairEl.on('ktt-audio',       onKttAudio);
     pairEl.on('ktt-confirm',     onKttConfirm);
     pairEl.on('ktt-list-reset',  onKttListReset);
     pairEl.on('ktt-list-update', onKttSync);
@@ -518,13 +553,8 @@
     wireBackgroundDetection();
 
     if (new URLSearchParams(location.search).get('role') === 'responder') {
-      kttLog('🔗', '?role=responder detected — auto-opening modal');
-      openPairModal();
-      setTimeout(() => {
-        document.querySelectorAll('.rp-modal button').forEach(b => {
-          if (b.textContent.trim() === 'Responder device') b.click();
-        });
-      }, 500);
+      kttLog('🔗', '?role=responder detected — auto-opening modal as responder');
+      openPairModal('responder');
     }
 
     if (savedState?.secret && savedState.role === 'responder') {
@@ -554,22 +584,28 @@
     }, 15000);
   }
 
-  function openPairModal() {
+  /* `role` is optional. When given ('responder' | 'controller') the modal skips
+     the "Select device role" step and goes straight to that side's screen —
+     responder.html knows perfectly well which half it is, so making the user
+     say so again is a step that can only be got wrong. rapidpair's openAs()
+     does exactly what the role buttons do, so nothing diverges. */
+  function openPairModal(role) {
     const state = loadReconnectState();
-    kttLog('📱', 'openPairModal — saved state:', state, '| pairSecure:', pairSecure);
+    kttLog('📱', 'openPairModal — role:', role || '(ask)', '| saved state:', state,
+           '| pairSecure:', pairSecure);
 
-    const alreadyInDOM = _pairElAppended;
+    const show = () => {
+      appendPairEl();
+      if (role && pairEl.openAs) pairEl.openAs(role);
+      else pairEl.open();
+    };
 
-    if (state?.secret && state.role === 'controller' && !pairSecure) {
+    if (!role && state?.secret && state.role === 'controller' && !pairSecure) {
       kttLog('⚡', 'Attempting fast reconnect before opening modal');
-      attemptFastReconnect().then(() => {
-        appendPairEl();
-        if (alreadyInDOM) pairEl.open();
-      });
+      attemptFastReconnect().then(show);
     } else {
       kttLog('📱', 'Opening modal directly');
-      appendPairEl();
-      if (alreadyInDOM) pairEl.open();
+      show();
     }
   }
 
@@ -615,8 +651,10 @@
 
   function onDisconnected() {
     // Losing the link mid-presentation must not leave sound running on a device
-    // that is no longer being controlled.
+    // that is no longer being controlled — nor leave the clinician looking at a
+    // "Playing on responder" badge for a stimulus nobody is producing.
     window.kttCal?.forceCloseGate('peer disconnected');
+    window.kttManual?.onRemoteAudio?.('end', { why: 'disconnected' });
     window.kttLogs?.flush();
     // Debounce — RapidPair can fire this many times rapidly during ICE failures
     clearTimeout(_disconnectDebounce);
@@ -1232,17 +1270,34 @@
       const armWatchdog = setTimeout(() => armNow('watchdog — audio never completed'),
                                      MAX_CLIP_MS * 2 + 1000);
 
+      /* Tell the clinician when sound actually starts and stops on this device.
+         Without it their end has no feedback at all: sendPlay() returns the
+         instant the message is queued, so the Play button frees up while the
+         child is still listening and there is nothing on screen to say the
+         stimulus is running. Reported from here, not from sendPlay(), so it
+         tracks the device making the sound. */
+      const finishAudio = why => { sendAudioState('end', { kupu: p.kupu, why }); };
+
       // A missing context, a suspended one, and unprimed media elements all need
       // a user gesture on iOS. Show the tap prompt so the child re-enables audio.
       const needsGesture = !_mediaPrimed && (!_audioCtx || _audioCtx.state === 'suspended');
+      const runAudio = () => {
+        sendAudioState('start', { kupu: p.kupu, level: p.level, ear: p.ear || 'binaural' });
+        playPresentation(carrierURL, kupuURL, p.level, p.ear)
+          .then(() => { finishAudio('complete'); armNow('audio complete'); })
+          .catch(e => { finishAudio('failed'); armNow('audio failed: ' + e.message); });
+      };
+
       if (needsGesture) {
         kttWarn('🎵', 'Audio not ready (ctx:', _audioCtx?.state || 'none', ') — showing tap prompt');
+        // The clinician needs to know the child has not heard anything yet.
+        sendAudioState('waiting', { kupu: p.kupu });
         showRespAudioPrompt(() => {
           unlockAudio();  // resumes the context and primes media inside the gesture
-          playPresentation(carrierURL, kupuURL, p.level, p.ear).then(() => armNow('audio complete'));
+          runAudio();
         });
       } else {
-        playPresentation(carrierURL, kupuURL, p.level, p.ear).then(() => armNow('audio complete'));
+        runAudio();
       }
     } else {
       kttLog('🎵', 'Audio playing on controller — arming grid after 800ms');
@@ -1409,6 +1464,24 @@
     try {
       return window.matchMedia('(orientation: portrait)').matches ? 3 : 5;
     } catch (_) { return 5; }
+  }
+
+  /* Playback state, responder → clinician.
+     'waiting' = the child has to tap to unlock audio before anything is heard;
+     'start'   = sound is running on this device now;
+     'end'     = it has finished (or failed — `why` says which). */
+  function sendAudioState(state, data) {
+    window.kttLogs?.event('audio-state', Object.assign({ state }, data || {}),
+                          `Responder audio ${state}`);
+    if (!pairSecure || pairRole !== 'responder') return;
+    try { pairEl.send('ktt-audio', Object.assign({ state, ts: Date.now() }, data || {})); }
+    catch (_) {}
+  }
+
+  function onKttAudio(p) {
+    if (pairRole !== 'controller') return;
+    kttLog('🔊', `Responder audio ${p?.state}`, p?.kupu || '');
+    window.kttManual?.onRemoteAudio?.(p?.state, p);
   }
 
   function sendMirrorState() {

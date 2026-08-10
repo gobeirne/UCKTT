@@ -365,6 +365,25 @@
   .mt-ear-btn:last-child { border-right: 0; }
   .mt-ear-btn.on { background: #1a5fa5; color: #fff; }
 
+  /* Live playback indicator — hidden until audio is actually running */
+  .mt-audio-live {
+    display: none; align-items: center; gap: 6px; white-space: nowrap;
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 10px;
+    background: #e8f0fc; color: #1a5fa5; border: 1px solid #9ab8f0;
+  }
+  .mt-audio-live.on { display: inline-flex; }
+  .mt-audio-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #1a5fa5;
+    animation: mt-audio-pulse 1s ease-in-out infinite;
+  }
+  @keyframes mt-audio-pulse {
+    0%, 100% { opacity: 1;   transform: scale(1); }
+    50%      { opacity: .35; transform: scale(.72); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mt-audio-dot { animation: none; }
+  }
+
   /* Which device is producing sound, and whether it is calibrated */
   .mt-cal-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 10px;
                   background: #ffe9e9; color: #a02020; border: 1px solid #e0b0b0; white-space: nowrap; }
@@ -618,7 +637,10 @@
   </div>
 
   <!-- MANUAL SETUP VIEW (default screen) -->
-  <div id="manualSetupView" class="active" style="display:block"></div>
+  <!-- No inline `display` here: `.active` in the stylesheet makes this a flex
+       column, which is what lets .mt-setup-body scroll. An inline style wins
+       over the sheet and silently breaks scrolling on every screen. -->
+  <div id="manualSetupView" class="active"></div>
 
   <!-- MANUAL TEST VIEW -->
   <div id="manualTestView"></div>
@@ -805,19 +827,6 @@
     // Expose globally
     window.kttDebugPanel = { toggle, entries };
 
-    // Log startup
-    // Warm the asset cache once per deployed version. KTT_APP_VERSION arrives
-    // asynchronously from the service worker, so wait briefly for it — keying
-    // the "already done" flag on a placeholder would stop a new deploy from
-    // ever re-warming the cache.
-    (function waitForVersion(tries) {
-      if (!window.kttPreload) return;
-      if (window.KTT_APP_VERSION || tries <= 0) {
-        window.kttPreload.autoRun(window.KTT_APP_VERSION || 'unversioned');
-      } else {
-        setTimeout(() => waitForVersion(tries - 1), 500);
-      }
-    })(12);
     console.log('[KTT] 🐛 Debug panel ready. Call kttDebugPanel.toggle() or tap "Debug log".');
   })();
   </script>
@@ -837,5 +846,16 @@
   <script src="calibrationUI.js"></script>
   <script src="manualTest.js"></script>
   <script src="pairedMode.js"></script>
+
+  <!-- Asset warm-up. This MUST come after preload.js: it used to live in the
+       inline block near the top of the file, above the script tag that defines
+       kttPreload, so `if (!window.kttPreload) return` fired every time and the
+       clinician device never preloaded anything at all. -->
+  <script>
+    (function () {
+      if (!window.kttPreload) { console.warn('[KTT] preload.js missing — assets not warmed'); return; }
+      window.kttPreload.autoRun(window.KTT_APP_VERSION || 'unversioned');
+    })();
+  </script>
 </body>
 </html>

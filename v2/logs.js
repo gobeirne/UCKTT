@@ -65,14 +65,29 @@
     flushTimer = setTimeout(flush, FLUSH_MS);
   }
 
+  /* Requeue on FAILURE, not on absence. This tested `sendLogBatch` for
+     existence — but the function always exists; it returns false when the
+     channel isn't up. So the "not connected yet — keep them" branch never ran
+     and every entry recorded before pairing was silently dropped, which is
+     precisely the part of the log that explains a pairing problem. */
   function flush() {
     clearTimeout(flushTimer);
     flushTimer = null;
     if (!pendingOut.length) return;
     const batch = pendingOut;
     pendingOut = [];
-    if (window.kttPaired?.sendLogBatch) window.kttPaired.sendLogBatch(batch);
-    else pendingOut = batch.concat(pendingOut);   // not connected yet — keep them
+    const sent = window.kttPaired?.sendLogBatch
+      ? window.kttPaired.sendLogBatch(batch) !== false
+      : false;
+    if (!sent) {
+      // Keep them, oldest first, and try again — but bound the backlog so an
+      // unpaired responder can't grow it without limit.
+      pendingOut = batch.concat(pendingOut);
+      if (pendingOut.length > MAX_ENTRIES) {
+        pendingOut = pendingOut.slice(pendingOut.length - MAX_ENTRIES);
+      }
+      scheduleFlush();
+    }
   }
 
   function receiveBatch(entries) {
