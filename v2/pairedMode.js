@@ -272,7 +272,12 @@
   window.kttPaired = {
     init,
     openPairModal,
-    isConnected:          () => pairSecure,
+    hardResetPairing,
+    /* Honest liveness, not just our cached flag. Callers use this to decide
+       whether to present a stimulus, so a stale `true` here is the difference
+       between a recorded response and a fabricated one. */
+    isConnected:          () => pairSecure && channelReallyOpen(),
+    isPairedFlagSet:      () => pairSecure,
     getRole:              () => pairRole,
     getAudioFromResponder:() => audioFromResponder,
     getResponderCal:      () => responderCal,
@@ -511,46 +516,57 @@
 
   // ─── Init ─────────────────────────────────────────────────────────────────
 
+  /* Building the element is separated from init() so it can be done again.
+     RapidPair owns its own DOM and nulls its internal refs on cleanup; when its
+     reconnect path throws (see hardResetPairing) there is no supported way to
+     nurse the instance back to health from outside. Making a fresh one is the
+     only reliable recovery, so construction has to be repeatable. */
+  function buildPairEl() {
+    const el = document.createElement('rapid-pair');
+    el.id = 'ktt-rapid-pair';
+    el.setAttribute('controller-label', 'Clinician');
+    el.setAttribute('responder-label',  'Responder device');
+    el.setAttribute('auto-close', 'true');
+
+    el.addEventListener('secure',       onSecure);
+    el.addEventListener('disconnected', onDisconnected);
+    el.addEventListener('reconnected',  onReconnected);
+    el.addEventListener('linkquality',  onLinkQuality);
+    el.addEventListener('linkrecovered',onLinkRecovered);
+
+    el.on('ktt-response',    onKttResponse);
+    el.on('ktt-sync',        onKttSync);
+    el.on('ktt-mirror',      onKttMirror);
+    el.on('ktt-mirror-req',  () => sendMirrorState());
+    el.on('ktt-image-chunk', onKttImageChunk);
+    el.on('ktt-play',        onKttPlay);
+    el.on('ktt-cal',         onKttCal);
+    el.on('ktt-log',         onKttLog);
+    el.on('ktt-ping',        onKttPing);
+    el.on('ktt-pong',        onKttPong);
+    el.on('ktt-audio',       onKttAudio);
+    el.on('ktt-confirm',     onKttConfirm);
+    el.on('ktt-list-reset',  onKttListReset);
+    el.on('ktt-list-update', onKttSync);
+    el.on('ktt-hello',       onKttHello);
+    el.on('ktt-ready',       onKttReadyReceived);
+    el.on('ktt-display',     onKttDisplay);
+    el.on('ktt-bg',          onKttBackground);
+    return el;
+  }
+
   function init() {
     kttLog('🚀', 'pairedMode init');
     const savedState = loadReconnectState();
     if (savedState) kttLog('💾', 'Saved reconnect state:', savedState);
     else kttLog('💾', 'No saved reconnect state');
 
-    pairEl = document.createElement('rapid-pair');
-    pairEl.id = 'ktt-rapid-pair';
-    pairEl.setAttribute('controller-label', 'Clinician');
-    pairEl.setAttribute('responder-label',  'Responder device');
-    pairEl.setAttribute('auto-close', 'true');
-
-    pairEl.addEventListener('secure',       onSecure);
-    pairEl.addEventListener('disconnected', onDisconnected);
-    pairEl.addEventListener('reconnected',  onReconnected);
-    pairEl.addEventListener('linkquality',  onLinkQuality);
-    pairEl.addEventListener('linkrecovered',onLinkRecovered);
-
-    pairEl.on('ktt-response',    onKttResponse);
-    pairEl.on('ktt-sync',        onKttSync);
-    pairEl.on('ktt-mirror',      onKttMirror);
-    pairEl.on('ktt-mirror-req',  () => sendMirrorState());
-    pairEl.on('ktt-image-chunk', onKttImageChunk);
-    pairEl.on('ktt-play',        onKttPlay);
-    pairEl.on('ktt-cal',         onKttCal);
-    pairEl.on('ktt-log',         onKttLog);
-    pairEl.on('ktt-ping',        onKttPing);
-    pairEl.on('ktt-pong',        onKttPong);
-    pairEl.on('ktt-audio',       onKttAudio);
-    pairEl.on('ktt-confirm',     onKttConfirm);
-    pairEl.on('ktt-list-reset',  onKttListReset);
-    pairEl.on('ktt-list-update', onKttSync);
-    pairEl.on('ktt-hello',       onKttHello);
-    pairEl.on('ktt-ready',       onKttReadyReceived);
-    pairEl.on('ktt-display',     onKttDisplay);
-    pairEl.on('ktt-bg',          onKttBackground);
+    pairEl = buildPairEl();
 
     kttLog('🚀', 'All listeners registered. pairEl NOT in DOM yet.');
 
     wireBackgroundDetection();
+    startLinkWatchdog();
 
     if (new URLSearchParams(location.search).get('role') === 'responder') {
       kttLog('🔗', '?role=responder detected — auto-opening modal as responder');
@@ -594,6 +610,17 @@
     kttLog('📱', 'openPairModal — role:', role || '(ask)', '| saved state:', state,
            '| pairSecure:', pairSecure);
 
+    /* If we believe we are paired but the channel is not actually carrying
+       traffic, the belief is what is wrong. Re-showing RapidPair's modal in
+       that state is what left the clinician tapping "Pair responder device"
+       eight times with nothing happening: the element had already torn its own
+       modal DOM down, so open() was a no-op and no code was ever generated.
+       Rebuild first, then open — the user gets a fresh code either way. */
+    if (pairSecure && !channelReallyOpen()) {
+      kttWarn('📱', 'Paired flag set but channel is dead — rebuilding before opening');
+      hardResetPairing('stale pairing state on open');
+    }
+
     const show = () => {
       appendPairEl();
       if (role && pairEl.openAs) pairEl.openAs(role);
@@ -609,6 +636,124 @@
     }
   }
 
+  /* Is the channel genuinely carrying traffic?
+     `isSecure()` is RapidPair's public answer and is the one that matters:
+     _handleDisconnect() nulls the secure channel, so it goes false the moment
+     the link really drops — which is exactly the signal KTT was failing to act
+     on. The DataChannel readyState is checked too where it is reachable, since
+     a channel can close without the secure wrapper being torn down yet. */
+  function channelReallyOpen() {
+    if (!pairEl) return false;
+    if (typeof pairEl.isSecure === 'function' && !pairEl.isSecure()) return false;
+    const dc = pairEl._dc;
+    if (dc && dc.readyState && dc.readyState !== 'open') return false;
+    return true;
+  }
+
+  /* ─── Link health ────────────────────────────────────────────────────────
+     The failure in the field was not that the link dropped — links drop — but
+     that nothing noticed. RapidPair logged "Cannot send: DataChannel not open"
+     for six minutes while KTT went on queueing stimuli and showing a green
+     badge. Three things were missing, and all three are here:
+
+       1. send() failures are counted, not ignored. Enough of them means the
+          link is gone whether or not a `disconnected` event ever arrived.
+       2. A watchdog checks liveness on a timer, so a link that dies without an
+          event is still caught.
+       3. When RapidPair itself has wedged — its reconnect threw
+          "Cannot read properties of null" and never retried — the only way back
+          is a fresh instance. hardResetPairing() does that and puts a usable
+          code on screen. */
+
+  const SEND_FAIL_LIMIT      = 3;      // consecutive failures before declaring it dead
+  const LINK_CHECK_MS        = 5000;
+  const STALLED_RECONNECT_MS = 20000;  // down this long with nothing retrying = wedged
+  let _sendFailures = 0;
+  let _linkWatchdog = null;
+  let _downSince    = null;
+
+  // Every outbound message goes through here. Returns true only if it left.
+  function safeSend(type, payload) {
+    if (!pairEl || !pairSecure) return false;
+    let ok = false;
+    try { ok = pairEl.send(type, payload) !== false; }
+    catch (e) { kttWarn('📡', 'send threw:', e.message); ok = false; }
+    if (ok) { _sendFailures = 0; return true; }
+
+    _sendFailures++;
+    kttWarn('📡', `send failed (${_sendFailures}/${SEND_FAIL_LIMIT}):`, type);
+    if (_sendFailures >= SEND_FAIL_LIMIT) {
+      kttWarn('📡', 'Channel is not carrying traffic — treating as disconnected');
+      onDisconnected();
+    }
+    return false;
+  }
+
+  function startLinkWatchdog() {
+    clearInterval(_linkWatchdog);
+    _linkWatchdog = setInterval(() => {
+      if (!pairEl) return;
+      if (pairSecure && !channelReallyOpen()) {
+        kttWarn('📡', 'Watchdog: we think we are paired but the channel is closed');
+        onDisconnected();
+        return;
+      }
+      /* RapidPair's controller reconnect can die quietly: one attempt threw
+         inside _controllerGenerateCode and nothing rescheduled it, leaving the
+         modal on screen with no code on it. If we have been down for a while
+         and it is neither retrying nor connected, take over. */
+      if (!pairSecure && pairRole === 'controller' && _downSince &&
+          Date.now() - _downSince > STALLED_RECONNECT_MS && !pairEl._reconnectTimer &&
+          !pairEl._reconnecting) {
+        kttWarn('📡', 'Reconnect appears stalled — rebuilding and offering a fresh code');
+        _downSince = null;
+        hardResetPairing('stalled reconnect');
+        appendPairEl();
+        pairEl.openAs ? pairEl.openAs('controller') : pairEl.open();
+        notifyReconnectNeeded();
+      }
+    }, LINK_CHECK_MS);
+  }
+
+  /* Tell the clinician, in the UI rather than only in the log, that the link is
+     gone and the code on screen is the way back. Silence here is what made the
+     failure feel unrecoverable. */
+  function notifyReconnectNeeded() {
+    showFastReconnectUI('Responder disconnected — enter the new code on that device');
+    setTimeout(hideFastReconnectUI, 12000);
+  }
+
+  /* Throw the RapidPair instance away and start again.
+     Used when the link is down and its own reconnect has stopped trying. The
+     element owns its modal DOM and nulls its internal references on cleanup, so
+     there is nothing safe to poke from out here — a new element is the recovery.
+     The saved secret is kept: if the responder still holds it, the fast path can
+     still work; if not, the clinician gets a fresh code to read out. */
+  function hardResetPairing(reason) {
+    kttLog('🔁', 'Hard reset of pairing —', reason || 'requested');
+    window.kttCal?.forceCloseGate('pairing reset');
+    window.kttManual?.onRemoteAudio?.('end', { why: 'pairing reset' });
+
+    try { pairEl?.disconnect?.(); } catch (_) {}
+    try { pairEl?._cleanup?.(); }   catch (_) {}
+    try { pairEl?.remove?.(); }     catch (_) {}
+    // RapidPair appends its modal wrapper to <body> separately from the element.
+    document.querySelectorAll('.rp-modal-wrapper, .rp-modal').forEach(n => {
+      const w = n.closest('.rp-modal-wrapper') || n;
+      if (w.parentNode && !w.closest('rapid-pair')) w.parentNode.removeChild(w);
+    });
+
+    pairSecure = false;
+    _sendFailures = 0;
+    _link = { state: 'idle', lastSeenMs: null, rtt: null };
+    _peerBackgrounded = false;
+    _pairElAppended = false;
+    updateStatusBadge('disconnected');
+
+    pairEl = buildPairEl();
+    return pairEl;
+  }
+
   function setAudioSource(src) {
     audioFromResponder = (src === 'responder');
   }
@@ -618,6 +763,9 @@
   function onSecure(e) {
     pairRole   = e.detail.role;
     pairSecure = true;
+    _connectSeq++;
+    _sendFailures = 0;
+    _downSince = null;
     // Stop beacon polling if running
     if (_beaconPollTimer) {
       clearInterval(_beaconPollTimer);
@@ -648,6 +796,14 @@
   }
 
   let _disconnectDebounce = null;
+  /* Bumped on every successful (re)connection. The debounce below used to read
+     `if (pairSecure) return; pairSecure = false;` — but nothing else ever
+     cleared pairSecure, so the guard was always true and the body never ran.
+     The clinician therefore stayed "connected" forever after a drop: no
+     ❌ DISCONNECTED in the log, badge still green, plays still being queued into
+     a dead channel. The guard has to be about whether a NEW connection arrived,
+     which is what the counter answers. */
+  let _connectSeq = 0;
 
   function onDisconnected() {
     // Losing the link mid-presentation must not leave sound running on a device
@@ -657,20 +813,27 @@
     window.kttManual?.onRemoteAudio?.('end', { why: 'disconnected' });
     window.kttLogs?.flush();
     // Debounce — RapidPair can fire this many times rapidly during ICE failures
+    const seq = _connectSeq;
     clearTimeout(_disconnectDebounce);
     _disconnectDebounce = setTimeout(() => {
-      if (pairSecure) return; // reconnected in the meantime
+      if (_connectSeq !== seq) return;   // genuinely reconnected in the meantime
       pairSecure = false;
       _link = { state: 'idle', lastSeenMs: null, rtt: null };
       _peerBackgrounded = false;
+      _sendFailures = 0;
+      if (!_downSince) _downSince = Date.now();
       kttLog('❌', 'DISCONNECTED');
       updateStatusBadge('disconnected');
+      if (pairRole === 'responder') showResponderDisconnected();
     }, 500);
   }
 
   function onReconnected(e) {
     pairRole   = e.detail.role;
     pairSecure = true;
+    _connectSeq++;
+    _sendFailures = 0;
+    _downSince = null;
     kttLog('🔄', 'RECONNECTED — role:', pairRole);
     updateStatusBadge('connected');
     if (pairRole === 'controller') {
@@ -1044,14 +1207,14 @@
     responderReady = false;
     kttLog('📋', 'sendListReset:', listName || '(no name)');
     if (typeof window.kttManual?.onPairResponderWaiting === 'function') window.kttManual.onPairResponderWaiting();
-    pairEl.send('ktt-list-reset', { listName: listName || '' });
+    safeSend('ktt-list-reset', { listName: listName || '' });
   }
 
   function sendDisplay(showLabels) {
     if (!pairSecure || pairRole !== 'controller') return;
     respShowLabels = showLabels;
     kttLog('🏷', 'sendDisplay: showLabels =', showLabels);
-    pairEl.send('ktt-display', { showLabels });
+    safeSend('ktt-display', { showLabels });
   }
 
   function sendSync() {
@@ -1064,7 +1227,7 @@
     const showLabels = typeof window.kttManual?.getShowLabels === 'function'
       ? window.kttManual.getShowLabels() : true;
     kttLog('📤', 'sendSync: list =', list.name, '| kupu count:', list.kupu.length, '| showLabels:', showLabels);
-    pairEl.send('ktt-sync', { kupu: list.kupu, listName: list.name, showLabels });
+    safeSend('ktt-sync', { kupu: list.kupu, listName: list.name, showLabels });
     const overrides = window.kttImageStore ? window.kttImageStore.all() : {};
     const keys = Object.keys(overrides).filter(k => list.kupu.includes(k));
     kttLog('🖼', 'Image overrides to send:', keys.length, keys.length ? keys : '(none)');
@@ -1086,16 +1249,28 @@
   }
 
   function sendPlay(kupu, level, ear) {
-    if (!pairSecure || pairRole !== 'controller') return;
+    if (!pairSecure || pairRole !== 'controller') return false;
     kttLog('▶', `sendPlay: ${kupu} @ ${level} ${responderCal?.isCalibrated ? 'dBA' : 'dBFS'} | ear: ${ear || 'binaural'} | playAudio on responder: ${audioFromResponder}`);
-    pairEl.send('ktt-play', { kupu, level, ear: ear || 'binaural', playAudio: audioFromResponder });
+    const ok = safeSend('ktt-play',
+      { kupu, level, ear: ear || 'binaural', playAudio: audioFromResponder });
+    if (!ok) {
+      /* The stimulus never left this device, so nothing was presented. Say so:
+         previously this failed silently and the clinician had no way to tell a
+         played kupu from a swallowed one — which, in a test whose whole output
+         is "did the child hear it", is the worst possible thing to be unsure of. */
+      kttWarn('▶', `sendPlay FAILED — ${kupu} was not presented`);
+      window.kttManual?.onRemoteAudio?.('end', { why: 'send failed', kupu });
+      notifyReconnectNeeded();
+      return false;
+    }
     pendingResponse = null;
+    return true;
   }
 
   function sendConfirm(correct) {
     if (!pairSecure || pairRole !== 'controller') return;
     kttLog('📝', `sendConfirm: ${correct ? 'CORRECT' : 'INCORRECT'} | kupu: ${pendingResponse}`);
-    pairEl.send('ktt-confirm', { correct, kupu: pendingResponse });
+    safeSend('ktt-confirm', { correct, kupu: pendingResponse });
     pendingResponse = null;
     refreshControllerHighlight(null);
   }
@@ -1169,8 +1344,9 @@
 
   function sendLogBatch(entries) {
     if (!pairSecure || pairRole !== 'responder') return false;
-    pairEl.send('ktt-log', { entries });
-    return true;
+    // Must report actual delivery: logs.js requeues on false, and a batch that
+    // was never sent but reported true is a hole in the session record.
+    return safeSend('ktt-log', { entries });
   }
 
   function onKttLog(p) {
@@ -1221,7 +1397,7 @@
     const prof = window.kttCal ? window.kttCal.profile() : null;
     if (!prof) return;
     kttLog('🎚', 'Sending calibration profile:', window.kttCal.summary(prof));
-    pairEl.send('ktt-cal', prof);
+    safeSend('ktt-cal', prof);
   }
 
   function onKttCal(p) {
@@ -1386,6 +1562,36 @@
         window.matchMedia('(orientation: portrait)').addEventListener('change', reportRotate);
       } catch (_) {}
     }
+  }
+
+  /* Responder side of a dropped link.
+     RapidPair puts its own modal back up on the responder, but the KTT grid
+     stays on screen underneath and the child's device looks like it is still
+     mid-test. Worse, if RapidPair's modal is not usable, there is no route back
+     at all. So: hide the grid, say plainly what has happened, and offer a
+     button that rebuilds the pairing element and reopens code entry — which is
+     what makes the responder receptive to the clinician's fresh code. */
+  function showResponderDisconnected() {
+    const view = document.getElementById('ktt-responder-view');
+    if (!view) return;
+    view.innerHTML = `<div class="resp-waiting">
+      <div style="font-size:48px;margin-bottom:16px">🔌</div>
+      <div style="font-size:20px;font-weight:700;color:#333">Disconnected</div>
+      <div style="font-size:14px;color:#888;margin-top:8px;max-width:300px;line-height:1.5">
+        The link to the clinician's device was lost. Ask them for a new pairing
+        code, then tap below.</div>
+      <button id="ktt-resp-repair" style="margin-top:20px;padding:13px 26px;font-size:16px;
+        font-weight:600;border:0;border-radius:10px;background:#1a5fa5;color:#fff;
+        font-family:inherit;cursor:pointer">Enter new pairing code</button>
+    </div>`;
+    const btn = document.getElementById('ktt-resp-repair');
+    if (btn) btn.onclick = () => {
+      window.kttCal?.prime();               // re-unlock audio inside the gesture
+      hardResetPairing('responder re-pair');
+      appendPairEl();
+      if (pairEl.openAs) pairEl.openAs('responder'); else pairEl.open();
+    };
+    addResponderDebugGesture(view);
   }
 
   function renderResponderGrid() {
@@ -1582,7 +1788,7 @@
     if (pairSecure) {
       kttLog('👆', 'Sending ktt-response:', kupu);
       window.kttLogs?.event('response', { kupu }, `Child tapped ${kupu}`);
-      pairEl.send('ktt-response', { kupu, ts: Date.now() });
+      safeSend('ktt-response', { kupu, ts: Date.now() });
       sendMirrorState();
     } else {
       kttWarn('👆', 'Not connected — response not sent');
