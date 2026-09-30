@@ -15,7 +15,7 @@
     { label: '/e/ /ē/', words: ['hēki','hēti','keke','wheke','pere'] },
     { label: '/i/ /ī/', words: ['kīngi','rīngi','rīhi','tīhi','ihu','inu','ipu','koti','poti'] },
     { label: '/o/ /ō/', words: ['koro','roro','mako','moko','kōrero','kōtiro','tōtiti'] },
-    { label: '/u/ /ū/', words: ['hū','pū','kutu','manu','motu'] },
+    { label: '/u/ /ū/', words: ['hū','kutu','manu','motu'] },   // pū retired (non-violence)
     { label: '/ai/',    words: ['kai','pai','tai','wai'] },
     { label: '/ae/',    words: ['taea','waea','whaea'] },
     { label: '/au/',    words: ['kau','rau','tau'] },
@@ -26,7 +26,7 @@
     haka:    ['waka'],
     hēki:    ['hēti'],
     hēti:    ['hēki'],
-    hū:      ['pū'],
+    hū:      [],        // pū retired, so hū has no minimal pair
     ihu:     ['inu','ipu'],
     inu:     ['ihu','ipu'],
     ipu:     ['inu','ihu'],
@@ -55,7 +55,6 @@
     pata:    ['pāpā','mata'],
     pere:    [],
     poti:    ['koti'],
-    pū:      ['hū'],
     rau:     ['kau','tau'],
     rīhi:    ['rīngi','tīhi'],
     rīngi:   ['kīngi','rīhi'],
@@ -76,22 +75,84 @@
   };
 
   // ─── Visual conflict groups ─────────────────────────────────────────────────
-  // Some kupu, with their DEFAULT images, share a confounding visual feature
-  // (e.g. both depict water, or both depict food), so a child could pick the
-  // right picture for the wrong reason. These are soft cautions, not blocks —
-  // a clinician using their own uploaded images may have no conflict at all.
-  // Add new members to a group's `words`; the warning fires for any 2+ in a group.
+  // Some kupu, with their DEFAULT images, share a confounding feature, so a
+  // child could pick the right picture for the wrong reason. These are soft
+  // cautions, not blocks — a clinician using their own uploaded images may
+  // have no conflict at all.
+  //
+  // Two shapes of group:
+  //   • Mutual  — { words:[...] }             any 2+ selected → warn.
+  //               Use when every member can be mistaken for every other
+  //               (e.g. waka / poti: both boats).
+  //   • Hub     — { hub:[...], words:[...] }  warns when at least one hub word
+  //               is selected AND 2+ of hub∪words are selected. Use when one
+  //               kupu is a broad category that the others merely fall into
+  //               (e.g. "kai" = food: pata and hēki are both food, but a child
+  //               asked for pata won't pick the egg, so pata + hēki alone is fine).
+  //               Several hub words are also mutually confusable with each other.
   const CONFLICT_GROUPS = [
-    { id: 'water', feature: 'contain water', words: ['inu', 'wai'] },
-    { id: 'food',  feature: 'are food',      words: ['kai', 'tīhi'] },
+    // Vehicles / boats
+    { id: 'vehicles', feature: 'are all vehicles (pahi and taraka are both heavy vehicles)',
+      words: ['waka', 'pahi', 'taraka'] },
+    { id: 'boats',    feature: 'can all be boats (pahī with a macron means ship)',
+      words: ['waka', 'poti', 'pahi'] },
+    { id: 'tyres',    feature: '— taea sounds like "tyre", and these images have tyres',
+      hub: ['taea'], words: ['taraka', 'pahi'] },
+
+    // People
+    { id: 'women',    feature: 'show women who could be read as a mum or a whaea',
+      words: ['māmā', 'whaea', 'mahi'] },
+    { id: 'mother',   feature: 'could show a mother',
+      hub: ['māmā'], words: ['kōrero', 'kōtiro'] },
+    { id: 'father',   feature: 'could show a father (pāpā, koro, the kīngi, the tāne in haka and moko, the mata face)',
+      hub: ['pāpā', 'koro'], words: ['kīngi', 'haka', 'moko', 'mata'] },
+    { id: 'talking',  feature: 'both show two people together (talking / working)',
+      words: ['kōrero', 'mahi'] },
+    { id: 'tane',     feature: 'both show traditional tāne with moko kanohi',
+      words: ['haka', 'moko'] },
+
+    // Body parts that appear on anything with a face / feet
+    { id: 'face',     feature: 'show faces',
+      hub: ['mata'], words: ['koti', 'kau', 'pāpā', 'mahi', 'wheke', 'kai', 'māmā', 'haka',
+                             'kōrero', 'kōtiro', 'manu', 'koro', 'kīngi', 'mako', 'moko',
+                             'kutu', 'whaea'] },
+    { id: 'nose',     feature: 'show noses',
+      hub: ['ihu'],  words: ['koti', 'kau', 'pāpā', 'mahi', 'kīngi', 'māmā', 'kōtiro',
+                             'koro', 'whaea', 'moko'] },
+    { id: 'shoes',    feature: 'show shoes',
+      hub: ['hū'],   words: ['māmā', 'pāpā', 'koro', 'kōtiro', 'whaea', 'kīngi'] },
+
+    // Food
+    { id: 'food',     feature: 'are food',
+      hub: ['kai'],  words: ['pata', 'hēki', 'keke', 'wheke', 'tīhi', 'koti', 'tōtiti',
+                             'mako', 'kau', 'māra'] },
+    { id: 'food-maybe', feature: 'might be read as food / drink',
+      hub: ['kai'],  words: ['manu', 'inu'] },
+
+    // Water, containers, sea
+    { id: 'water',    feature: 'contain water',
+      hub: ['wai'],  words: ['tai', 'ipu', 'inu', 'motu'] },
+    { id: 'container', feature: 'are container-like (the wai image is a cup of water)',
+      words: ['ipu', 'rīhi', 'wai'] },
+    { id: 'coast',    feature: 'are very similar images (sea and land)',
+      words: ['tai', 'motu'] },
+    { id: 'sun',      feature: '— paki is the sun, and the tai image has a sun in it',
+      words: ['paki', 'tai'] },
+
+    // Leaves / feathers
+    { id: 'leaf',     feature: 'show leaves (rau can also mean feather)',
+      hub: ['rau'],  words: ['māra', 'motu', 'kai', 'manu'] },
   ];
 
-  // Returns array of { feature, words:[...] } for every group with 2+ selected.
+  // Returns array of { feature, words:[...] } for every group that fires.
   function detectConflicts() {
     const out = [];
     CONFLICT_GROUPS.forEach(g => {
-      const hits = g.words.filter(w => selected.has(w));
-      if (hits.length >= 2) out.push({ feature: g.feature, words: hits });
+      const hubs = (g.hub || []).filter(w => selected.has(w));
+      const rest = g.words.filter(w => selected.has(w));
+      const fires = g.hub ? (hubs.length >= 1 && hubs.length + rest.length >= 2)
+                          : rest.length >= 2;
+      if (fires) out.push({ feature: g.feature, words: [...hubs, ...rest] });
     });
     return out;
   }
