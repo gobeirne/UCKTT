@@ -12,7 +12,7 @@
   const LS_KEY_LISTS     = 'ktt_custom_lists_v1';
   const DEFAULT_LEVEL    = 40;
   const LEVEL_STEP       = 5;
-  const LEVEL_MIN        = 20;
+  const LEVEL_MIN        = -10;
   const LEVEL_MAX        = 90;
 
   const SCORING_MODES = {
