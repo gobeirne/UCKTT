@@ -88,7 +88,13 @@
      ceiling, just one long enough to be a runaway guard rather than a timer. */
   const MAX_SUSTAINED_MS = 20 * 60 * 1000;
   const LOOP_TRIM_S   = 0.03;  // skip mp3 encoder padding at both ends of the loop
-  const RANGE_SPAN_DB = 60;    // dial spans this far below the calibrated max
+  /* Uncalibrated dB FS attenuator spans this far below unity. Must reach at
+     least −96 dB FS; 100 keeps the floor on the 5 dB grid. */
+  const RANGE_SPAN_DB = 100;
+  /* Absolute floor for a calibrated device. The floor used to be the calibrated
+     maximum minus 60 dB, which on a device calibrated to 78.4 dB A stopped the
+     dial at 15 dB A — too high to find thresholds for good listeners. */
+  const MIN_LEVEL_DBA = -10;
   const STEP_DB       = 5;
   const MAX_CLIP_MS   = 8000;  // playback watchdog
 
@@ -383,9 +389,7 @@
 
   function maxLevel() { return cal.isCalibrated ? Number(cal.measuredDbA) : 0; }
   function minLevel() {
-    return cal.isCalibrated
-      ? Math.floor(Number(cal.measuredDbA) / STEP_DB) * STEP_DB - RANGE_SPAN_DB
-      : -RANGE_SPAN_DB;
+    return cal.isCalibrated ? MIN_LEVEL_DBA : -RANGE_SPAN_DB;
   }
   function unit() { return cal.isCalibrated ? 'dB A' : 'dB FS'; }
 

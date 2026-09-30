@@ -14,6 +14,7 @@
   const LEVEL_STEP       = 5;
   const LEVEL_MIN        = -10;
   const LEVEL_MAX        = 90;
+  const UNCAL_MIN_DBFS   = -100;   // uncalibrated floor; must reach at least −96
 
   const SCORING_MODES = {
     free: { label: 'Full manual', desc: 'Clinician controls order, level, and scoring freely.' },
@@ -545,6 +546,11 @@
 
   // ─── SETUP SCREEN ─────────────────────────────────────────────────────────
 
+  function todayNZ() {
+    const d = new Date();
+    return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+  }
+
   function renderSetupScreen() {
     const root = document.getElementById('manualSetupView');
     if (!root) return;
@@ -554,6 +560,13 @@
     ['clientName','nhi','dob','testDate','clinicianName','clinicianRole','location'].forEach(k => {
       if (S[k] !== undefined) sessionMeta[k] = S[k];
     });
+    /* Test date fills itself with today's date. If it was auto-filled on an
+       earlier day, it rolls forward; a date the clinician typed is left alone. */
+    const today = todayNZ();
+    if (!sessionMeta.testDate || (S.testDateAuto && sessionMeta.testDate !== today)) {
+      sessionMeta.testDate = today;
+      saveSettings({ testDate: today, testDateAuto: true });
+    }
     if (S.scoringMode) scoringMode = S.scoringMode;
     if (S.activeListId) activeListId = S.activeListId;
     if (S.clinicianViewMode) clinicianViewMode = S.clinicianViewMode;
@@ -624,7 +637,10 @@
       const d = el('div', { style: `flex:${flex||1};min-width:72px` });
       d.appendChild(el('div', { cls: 'mt-field-label' }, label));
       const i = el('input', { cls: 'mt-inp', placeholder, value: sessionMeta[key] || '',
-        oninput: e => { sessionMeta[key] = e.target.value; saveSettings({ ...sessionMeta }); }
+        oninput: e => {
+          sessionMeta[key] = e.target.value;
+          saveSettings(key === 'testDate' ? { ...sessionMeta, testDateAuto: false } : { ...sessionMeta });
+        }
       });
       d.appendChild(i);
       return d;
@@ -633,7 +649,7 @@
     const row1 = el('div', { cls: 'mt-form-row' });
     row1.append(inp('Client name', 'clientName', 'Full name', 2), inp('NHI', 'nhi', 'NHI number', 1));
     const row2 = el('div', { cls: 'mt-form-row' });
-    row2.append(inp('Date of birth', 'dob', 'DD/MM/YYYY', 1), inp('Test date', 'testDate', 'Today', 1));
+    row2.append(inp('Date of birth', 'dob', 'DD/MM/YYYY', 1), inp('Test date', 'testDate', 'DD/MM/YYYY', 1));
     const row3 = el('div', { cls: 'mt-form-row' });
     row3.append(inp('Clinician', 'clinicianName', 'Full name', 2), inp('Role', 'clinicianRole', 'e.g. Audiologist', 1));
     const row4 = el('div', { cls: 'mt-form-row' });
@@ -1440,13 +1456,12 @@
     const c = activeCalProfile();
     // Uncalibrated (or no profile yet from the responder): a dB FS attenuator,
     // unity at 0 — never a fabricated dB(A) figure.
-    if (!c || !c.isCalibrated) return { min: -60, max: 0, unit: 'dB FS', calibrated: false };
+    if (!c || !c.isCalibrated) return { min: UNCAL_MIN_DBFS, max: 0, unit: 'dB FS', calibrated: false };
 
     /* Two constraints, and BOTH apply. The calibration fixes what the device can
-       physically deliver: never above the measured maximum, and the dial spans
-       60 dB below it. LEVEL_MIN/LEVEL_MAX are the clinical range for this test.
-       Taking only the calibrated span (as this did until now) let the dial go
-       below 20 dB A on a device calibrated to 78.4, because 75 − 60 = 15. */
+       physically deliver: never above the measured maximum, never below its
+       floor. LEVEL_MIN/LEVEL_MAX are the clinical range for this test
+       (floor −10 dB A, so thresholds of good listeners can be reached). */
     let min = Math.max(LEVEL_MIN, c.minLevel);
     let max = Math.min(LEVEL_MAX, c.maxLevel);
     // A device calibrated below the clinical floor can't reach it; rather than
@@ -1875,9 +1890,17 @@
       <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <input type="checkbox" id="po-header" checked> Include UC header
       </label>
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <input type="checkbox" id="po-labels" checked> Show kupu labels
       </label>
+      <div id="po-size-wrap" style="margin:0 0 10px 24px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="color:#555">Label size</span>
+          <input type="range" id="po-size" min="6" max="48" step="1" style="flex:1">
+          <span id="po-size-val" style="width:36px;text-align:right;font-variant-numeric:tabular-nums"></span>
+        </div>
+        <div id="po-size-sample" style="margin-top:6px;height:52px;display:flex;align-items:center;justify-content:center;border:1px dashed #ddd;border-radius:6px;color:#bbb;overflow:hidden;white-space:nowrap">${list.kupu[0] || 'kupu'}</div>
+      </div>
       <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
         <input type="checkbox" id="po-listname" checked> Show list name
       </label>
@@ -1889,13 +1912,35 @@
 
     document.body.appendChild(dlg);
 
+    // Label size (pt), remembered between prints.
+    const sizeIn   = document.getElementById('po-size');
+    const sizeVal  = document.getElementById('po-size-val');
+    const sample   = document.getElementById('po-size-sample');
+    const labelsCb = document.getElementById('po-labels');
+    const sizeWrap = document.getElementById('po-size-wrap');
+    const savedSize = Number(loadSettings().printLabelPt);
+    sizeIn.value = String(isFinite(savedSize) && savedSize >= 6 && savedSize <= 48 ? savedSize : 7);
+    const syncSize = () => {
+      sizeVal.textContent = `${sizeIn.value} pt`;
+      sample.style.fontSize = `${sizeIn.value}pt`;
+    };
+    const syncLabels = () => {
+      sizeWrap.style.opacity = labelsCb.checked ? '1' : '0.4';
+      sizeIn.disabled = !labelsCb.checked;
+    };
+    sizeIn.oninput = syncSize;
+    labelsCb.onchange = syncLabels;
+    syncSize(); syncLabels();
+
     document.getElementById('po-cancel').onclick = () => dlg.remove();
     document.getElementById('po-print').onclick = () => {
       const showHeader   = document.getElementById('po-header').checked;
-      const showLabels_p = document.getElementById('po-labels').checked;
+      const showLabels_p = labelsCb.checked;
       const showListName = document.getElementById('po-listname').checked;
+      const labelPt      = Number(sizeIn.value);
+      saveSettings({ printLabelPt: labelPt });
       dlg.remove();
-      doPrint(list, showHeader, showLabels_p, showListName);
+      doPrint(list, showHeader, showLabels_p, showListName, labelPt);
     };
 
     // Close on backdrop click
@@ -1905,7 +1950,8 @@
     document.body.insertBefore(backdrop, dlg);
   }
 
-  function doPrint(list, showHeader, showLabels_p, showListName) {
+  function doPrint(list, showHeader, showLabels_p, showListName, labelPt) {
+    const lblPt = isFinite(labelPt) && labelPt > 0 ? labelPt : 7;
     const n = list.kupu.length;
     const cols = n <= 9 ? 3 : n <= 12 ? 4 : 5;
     const overrides = window.kttImageStore ? window.kttImageStore.all() : {};
@@ -1953,7 +1999,8 @@
           overflow: hidden;
         }
         .cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; background: #fff; }
-        .lbl { font-size: 9px; color: #bbb; margin-top: 2px; flex-shrink: 0; }
+        .lbl { font-size: ${lblPt}pt; line-height: 1.15; color: #bbb; margin-top: 2px; flex-shrink: 0;
+                text-align: center; max-width: 100%; overflow-wrap: anywhere; }
       </style></head><body>
       ${headerHTML}
       <div class="grid">${cells}</div>
