@@ -10,7 +10,7 @@
  * cache on activate. Bump APP_VERSION on every deploy (or let your build stamp it).
  */
 
-const APP_VERSION = '2.8.3';
+const APP_VERSION = '2.9.3';
 const CACHE_NAME  = `ktt-v${APP_VERSION}`;
 
 // App shell — must-have files, including the formerly RapidPair-owned libs so a
@@ -23,6 +23,8 @@ const APP_SHELL = [
   './imageStore.js',
   './listBuilder.js',
   './manualTest.js',
+  './studyMode.js',
+  './itemAnalysis.js',
   './logs.js',
   './logViewer.js',
   './preload.js',

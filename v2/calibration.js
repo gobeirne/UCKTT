@@ -438,6 +438,16 @@
 
         el.loop = !!o.loop;
         el.onended = () => { if (!el.loop) done(true); };
+        /* Onset timestamp for response times: 'playing' fires when playback
+           actually begins; add the context's output latency so the time is when
+           sound leaves the device, not when the decoder started. High-resolution
+           wall clock (timeOrigin + now) so it can be compared across devices. */
+        if (typeof o.onStart === 'function') {
+          el.addEventListener('playing', () => {
+            const lat = ctx ? ((ctx.outputLatency || 0) || (ctx.baseLatency || 0)) * 1000 : 0;
+            try { o.onStart({ t: performance.timeOrigin + performance.now() + lat, latencyMs: lat }); } catch (_) {}
+          }, { once: true });
+        }
         el.onerror = () => { warn('media error:', url); done(false); };
 
         /* `ended` is the normal completion path, but it is not guaranteed — a
@@ -498,7 +508,7 @@
     try {
       let ok = true;
       for (const it of list) {
-        const got = await play(it.role, it.url, { level: o.level, ear: o.ear });
+        const got = await play(it.role, it.url, { level: o.level, ear: o.ear, onStart: it.onStart });
         ok = ok && got;
       }
       return ok;

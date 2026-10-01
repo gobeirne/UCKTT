@@ -236,14 +236,20 @@
   }
 
   // Carrier phrase then kupu. Always resolves so the caller can arm the grid.
+  // Response timing on the responder: onset of the KUPU clip (after the
+  // carrier) on this device's own clock, so RT needs no cross-device sync.
+  let _kupuOnset = null;          // { t, latencyMs } for the current presentation
+  const hiresNow = () => performance.timeOrigin + performance.now();
+
   async function playPresentation(carrierURL, kupuURL, level, ear) {
+    _kupuOnset = null;
     // Preferred path: routed through calibration.js so this device's own
     // profile sets the gain and the requested ear is honoured. One gate token
     // spans carrier + kupu, so the gate cannot dip in the gap between them.
     if (window.kttCal?.playSequence) {
       await window.kttCal.playSequence([
         { role: 'carrier', url: carrierURL },
-        { role: 'kupu',    url: kupuURL },
+        { role: 'kupu',    url: kupuURL, onStart: o => { _kupuOnset = o; } },
       ], { level, ear, reason: 'presentation:responder' });
       return;
     }
@@ -1107,7 +1113,8 @@
     kttLog('👆', `Responder tapped: ${p.kupu} (prev: ${pendingResponse || 'none'})`);
     pendingResponse = p.kupu;
     refreshControllerHighlight(p.kupu);
-    if (typeof window.kttManual?.onPairResponse === 'function') window.kttManual.onPairResponse(p.kupu);
+    if (typeof window.kttManual?.onPairResponse === 'function')
+      window.kttManual.onPairResponse(p.kupu, { ts: p.ts, rt_ms: p.rt_ms, arrived: hiresNow() });
   }
 
   function refreshControllerHighlight(kupu) {
@@ -1240,6 +1247,7 @@
     if (pairRole !== 'responder') return;
     kttLog('▶', `Received ktt-play: ${p.kupu} @ ${p.level} dBA | playAudio: ${p.playAudio}`);
     respArmed = false; respTapped = null; respConfirmed = false;
+    _kupuOnset = null;   // set again only if THIS device plays the kupu
     document.querySelectorAll('#ktt-responder-grid .resp-cell').forEach(c => {
       c.classList.remove('resp-tapped', 'resp-done');
     });
@@ -1581,8 +1589,12 @@
     if (cell) cell.classList.add('resp-tapped');
     if (pairSecure) {
       kttLog('👆', 'Sending ktt-response:', kupu);
-      window.kttLogs?.event('response', { kupu }, `Child tapped ${kupu}`);
-      pairEl.send('ktt-response', { kupu, ts: Date.now() });
+      const ts = hiresNow();
+      // Only the responder knows its own kupu onset; when it played the audio
+      // the RT is exact (same clock). Otherwise the controller works it out.
+      const rt = _kupuOnset ? Math.round(ts - _kupuOnset.t) : null;
+      window.kttLogs?.event('response', { kupu, rt_ms: rt }, `Child tapped ${kupu}` + (rt != null ? ` (${rt} ms)` : ''));
+      pairEl.send('ktt-response', { kupu, ts, rt_ms: rt });
       sendMirrorState();
     } else {
       kttWarn('👆', 'Not connected — response not sent');

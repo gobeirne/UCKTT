@@ -52,6 +52,9 @@
   let currentLevel  = DEFAULT_LEVEL;
   let currentEar    = 'binaural';   // 'left' | 'right' | 'binaural' | 'soundfield'
   let presentations = [];           // one row per stimulus played, for the record
+  let responses     = [];           // one row per scored paired-device tap: target vs chosen picture
+  let lastTap       = null;         // the picture the child last tapped (paired mode)
+  let kupuOnset     = null;         // { t, latencyMs } when the clinician device started the kupu clip
   let armedKupu     = null;
   let labelMode     = 'both';   // 'off' | 'child' | 'clinician' | 'both'
   // Derived helpers — keep older boolean call sites working.
@@ -401,6 +404,8 @@
   function playKupu(kupu) {
     if (!kupu) return;
     stopAudio();
+    kupuOnset = null;
+    lastTap   = null;   // a tap belongs to one presentation only
     ensurePipSlot(kupu, currentLevel);
 
     const btn = document.getElementById('mt-play-btn');
@@ -438,7 +443,8 @@
       setAudioLive('clinician', { kupu });
       window.kttCal.playSequence([
         { role: 'carrier', url: CARRIER_URL },
-        { role: 'kupu',    url: `${AUDIO_DIR}/${encodeURIComponent(kupu)}.mp3` },
+        { role: 'kupu',    url: `${AUDIO_DIR}/${encodeURIComponent(kupu)}.mp3`,
+          onStart: o => { kupuOnset = o; } },
       ], { level: currentLevel, ear: currentEar, reason: `presentation:${kupu}` })
         .then(() => {
           setAudioLive(null);
@@ -612,6 +618,7 @@
     const left = el('div', { cls: 'mt-setup-left' });
     body.appendChild(left);
     left.appendChild(sect('Client', renderClientForm()));
+    if (window.kttStudy) left.appendChild(sect('Study', window.kttStudy.renderCard(() => renderSetupScreen())));
     left.appendChild(sect('Test list', renderListSelector()));
     left.appendChild(sect('Scoring method', renderScoringSelector()));
 
@@ -839,7 +846,8 @@
   function renderActions() {
     const card = el('div', { cls: 'mt-card' });
     card.appendChild(el('button', { cls: 'mt-btn-primary',
-      style: 'width:100%;margin-bottom:6px', onclick: startManualTest }, '▶ Start manual test'));
+      style: 'width:100%;margin-bottom:6px',
+      onclick: () => { window.kttStudy?.clearCurrent(); startManualTest(); } }, '▶ Start manual test'));
     card.appendChild(el('button', { cls: 'mt-btn',
       style: 'width:100%;margin-bottom:4px', onclick: printImageSheet }, '🖨 Print image sheet'));
     card.appendChild(el('button', { cls: 'mt-btn',
@@ -923,6 +931,9 @@
     card.appendChild(el('button', { cls: 'mt-btn', style: 'width:100%',
       onclick: importAndShowReport
     }, '📂 Open saved results…'));
+    if (window.kttItemAnalysis) card.appendChild(el('button', { cls: 'mt-btn', style: 'width:100%;margin-top:4px',
+      onclick: () => window.kttItemAnalysis.open()
+    }, '📊 Item analysis (many results)…'));
     return card;
   }
 
@@ -1044,6 +1055,10 @@
     levelsUsed       = [];
     armedKupu        = null;
     sessionSaved     = false;
+    presentations    = [];
+    responses        = [];
+    lastTap          = null;
+    kupuOnset        = null;
     currentSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     currentLevel     = DEFAULT_LEVEL;
     const S = loadSettings();
@@ -1097,6 +1112,9 @@
     const clientStr = [sessionMeta.clientName, sessionMeta.nhi].filter(Boolean).join(' · ') || 'No client';
     infoBar.appendChild(el('div', { cls: 'mt-info-client' }, clientStr));
     infoBar.appendChild(el('div', { cls: 'mt-info-list' }, list.name));
+    const studyBadge = window.kttStudy?.badge(list);
+    if (studyBadge) infoBar.appendChild(el('div', { cls: 'mt-info-mode',
+      style: 'background:#e8f0fb;color:#0c3d8a;border-radius:999px;padding:2px 10px;font-weight:600' }, studyBadge));
     infoBar.appendChild(el('div', { cls: 'mt-info-mode' }, SCORING_MODES[scoringMode].label));
 
     // Label mode: off / child / clinician / both
@@ -1298,7 +1316,9 @@
 
     // Body — always render all kupu rows
     const tbody = el('tbody', { id: 'mt-tbody' });
-    list.kupu.forEach(kupu => tbody.appendChild(buildKupuRow(kupu)));
+    // Study mode supplies a counterbalanced presentation order for this participant.
+    const order = window.kttStudy?.clinicianOrder(list) || list.kupu;
+    order.forEach(kupu => tbody.appendChild(buildKupuRow(kupu)));
     table.appendChild(tbody);
     container.appendChild(table);
   }
@@ -1530,7 +1550,28 @@
   // ─── Peer response handling ───────────────────────────────────────────────
 
   // Called by pairedMode.js when responder taps a kupu
-  function onPairResponse(kupu) {
+  /* Response time: kupu onset (start of the word, after the carrier phrase,
+     corrected for output latency) → the child's tap.
+       responder-clock — the responder played the audio and timed the tap on
+                         its own clock: exact to a few ms.
+       clock-sync      — this device played it; the tap time is mapped across
+                         using the measured clock offset (± half the sync RTT).
+       arrival         — no clock sync yet; tap ARRIVAL time here, which adds
+                         network delay (typically tens of ms). */
+  function responseTime(info) {
+    if (!info) return { rt_ms: null, rt_method: null, rt_uncertainty_ms: null };
+    if (info.rt_ms != null) return { rt_ms: info.rt_ms, rt_method: 'responder-clock', rt_uncertainty_ms: 5 };
+    if (!kupuOnset) return { rt_ms: null, rt_method: null, rt_uncertainty_ms: null };
+    const sk = window.kttLogs?.getSkew();
+    if (sk && sk.offsetMs != null && info.ts != null) {
+      return { rt_ms: Math.round(window.kttLogs.toLocalClock(info.ts) - kupuOnset.t),
+               rt_method: 'clock-sync', rt_uncertainty_ms: Math.round((sk.rttMs || 0) / 2) + 5 };
+    }
+    return { rt_ms: Math.round(info.arrived - kupuOnset.t), rt_method: 'arrival', rt_uncertainty_ms: null };
+  }
+
+  function onPairResponse(kupu, info) {
+    lastTap = { kupu, t: Date.now(), ...responseTime(info) };
     const isCorrect = (kupu === armedKupu);
     const target = armedKupu;   // snapshot — armed kupu may change during the delay
 
@@ -1550,7 +1591,11 @@
     const bar   = document.getElementById('mt-confirm-bar');
     const label = document.getElementById('mt-confirm-kupu');
     if (bar)   { bar.style.display = 'flex'; }
-    if (label) { label.textContent = kupu; }
+    if (label) { label.textContent = kupu + rtSuffix(); }
+  }
+
+  function rtSuffix() {
+    return lastTap?.rt_ms != null ? `  ·  ${(lastTap.rt_ms / 1000).toFixed(2)} s` : '';
   }
 
   // `result` may be true / false (legacy call sites) or a pip state string:
@@ -1578,6 +1623,13 @@
       const emptyIdx = pips.indexOf('empty');
       if (emptyIdx >= 0) {
         pips[emptyIdx] = state;
+        // Which picture was chosen — lets item analysis show real confusions.
+        responses.push({ t: Date.now(), target: scoreKupu,
+          chosen: state === 'noresponse' ? null : (lastTap?.kupu ?? null),
+          level: currentLevel, unit: levelBounds().unit, state,
+          rt_ms: state === 'noresponse' ? null : (lastTap?.rt_ms ?? null),
+          rt_method: state === 'noresponse' ? null : (lastTap?.rt_method ?? null),
+          rt_uncertainty_ms: state === 'noresponse' ? null : (lastTap?.rt_uncertainty_ms ?? null) });
         refreshScoringTable();
         autosaveSession();
       }
@@ -1603,7 +1655,7 @@
       label.style.color = good ? '#2e7d32' : '#c62828';
       label.style.fontWeight = '700';
     }
-    if (kEl) { kEl.textContent = kupu; kEl.style.color = good ? '#2e7d32' : '#c62828'; }
+    if (kEl) { kEl.textContent = kupu + rtSuffix(); kEl.style.color = good ? '#2e7d32' : '#c62828'; }
 
     // Show fully, then fade opacity to 0 over 3s, then reset for reuse.
     clearTimeout(bar._fadeT1); clearTimeout(bar._fadeT2);
@@ -1630,7 +1682,11 @@
 
   // Exposed for pairedMode.js to call sendSync
   function getActiveListForPair() {
-    return getActiveList();
+    const list = getActiveList();
+    // Study mode: the child's picture grid gets its own seeded order, independent
+    // of the presentation order, so position on screen isn't confounded with kupu.
+    const grid = list && window.kttStudy?.childGridOrder(list);
+    return grid ? { ...list, kupu: grid } : list;
   }
 
   function onPairReady() {
@@ -1980,7 +2036,9 @@
     // Order on the sheet is independent of scoring (responses are recorded by
     // kupu, not position), so shuffling is safe and stops vowel groups/pairs
     // from sitting side by side the way they do in list order.
-    const order = shuffle ? shuffledCopy(list.kupu) : list.kupu.slice();
+    // Study mode: print the participant's recorded picture layout (no reshuffle).
+    const studyGrid = window.kttStudy?.childGridOrder(list);
+    const order = studyGrid || (shuffle ? shuffledCopy(list.kupu) : list.kupu.slice());
     const cells = order.map(kupu => {
       const lbl = showLabels_p ? `<div class="lbl">${kupu}</div>` : '';
       // Use custom override if present (base64 data URL), otherwise fall back with onerror chain
@@ -2037,7 +2095,8 @@
       ${headerHTML}
       <div class="grid" id="grid">${cells}</div>
       <div class="toolbar">
-        <button id="tb-shuffle" title="Shuffle the images into a new order">🔀 Reshuffle</button>
+        ${studyGrid ? '<span style="font:12px system-ui;color:#555;align-self:center">Study layout — order is recorded</span>'
+                    : '<button id="tb-shuffle" title="Shuffle the images into a new order">🔀 Reshuffle</button>'}
         <button id="tb-print" class="primary">🖨 Print</button>
       </div>
       <script>
@@ -2056,7 +2115,8 @@
             } while (out.every(function (c, i) { return c === cells[i]; }));
             out.forEach(function (c) { grid.appendChild(c); });   // moves nodes; no image reload
           }
-          document.getElementById('tb-shuffle').onclick = shuffle;
+          var sb = document.getElementById('tb-shuffle');
+          if (sb) sb.onclick = shuffle;
           document.getElementById('tb-print').onclick = function () { window.print(); };
         })();
       <\/script>
@@ -2102,7 +2162,7 @@
     }
 
     return {
-      schema_version: 4,   // 3: no_response pips · 4: calibration + presentation record
+      schema_version: 5,   // 3: no_response pips · 4: calibration + presentation record · 5: study block + responses
       exported_at:    now.toISOString(),
       client:         { ...sessionMeta },
       clinic:         clinicSettings,
@@ -2129,6 +2189,8 @@
       },
       routing:        currentEar,
       presentations:  presentations.slice(),
+      responses:      responses.slice(),
+      ...(window.kttStudy?.resultBlock(list) ? { study: window.kttStudy.resultBlock(list) } : {}),
       clock_skew:     window.kttLogs ? window.kttLogs.getSkew() : null,
       reaction_times: window.kttLogs ? window.kttLogs.reactionTimes() : [],
 
@@ -2250,7 +2312,10 @@
 
   function downloadJSON(data) {
     const ts   = new Date().toISOString().replace(/[:.]/g, '-');
-    const slug = (data.client?.clientName || 'client').replace(/\s+/g, '_');
+    const slug = (data.study
+      ? `${data.study.study_name}_${data.study.participant_code}_L${data.study.sequence_position}`
+      : (data.client?.clientName || 'client')).replace(/\s+/g, '_');
+    if (data.study) window.kttStudy?.onSaved(getActiveList());
     const a    = document.createElement('a');
     a.href     = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     a.download = `KTT_${slug}_${ts}.json`;
@@ -2524,6 +2589,27 @@ ${lvls.length ? `
     onPairResponse, onPairReady, onPairResponderWaiting, onResponderCal,
     onRemoteAudio,
     getActiveListForPair, getShowLabels: () => childLabelsOn(),
+    getAllLists: () => { rebuildAllLists(); return allLists.slice(); },
+    addCustomLists: (lists) => {
+      const cur = loadCustomLists();
+      const add = lists.filter(l => !cur.some(c => c.id === l.id))
+        .map(l => ({ id: l.id, name: l.name, kupu: l.kupu, builtin: false, createdAt: Date.now() }));
+      if (add.length) { saveCustomLists([...add, ...cur]); rebuildAllLists(); }
+    },
+    startStudyList: (listId, who) => {
+      inTestSettings = false;
+      activeListId = listId;
+      // Participant code stands in for the name; DOB comes from the study record.
+      // NHI is cleared so a previous child's identifier can't carry over.
+      if (who) {
+        sessionMeta.clientName = who.code || '';
+        sessionMeta.nhi = '';
+        sessionMeta.dob = who.dob || '';
+        saveSettings({ ...sessionMeta });
+      }
+      saveSettings({ activeListId });
+      startManualTest();
+    },
     isTestActive: () => {
       const v = document.getElementById('manualTestView');
       return !!(v && v.classList.contains('active'));
