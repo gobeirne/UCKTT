@@ -1901,8 +1901,11 @@
         </div>
         <div id="po-size-sample" style="margin-top:6px;height:52px;display:flex;align-items:center;justify-content:center;border:1px dashed #ddd;border-radius:6px;color:#bbb;overflow:hidden;white-space:nowrap">${list.kupu[0] || 'kupu'}</div>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <input type="checkbox" id="po-listname" checked> Show list name
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+        <input type="checkbox" id="po-shuffle"> Shuffle image order
       </label>
       <div style="display:flex;gap:8px">
         <button id="po-cancel" style="flex:1;padding:7px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer">Cancel</button>
@@ -1928,6 +1931,8 @@
       sizeWrap.style.opacity = labelsCb.checked ? '1' : '0.4';
       sizeIn.disabled = !labelsCb.checked;
     };
+    const shuffleCb = document.getElementById('po-shuffle');
+    shuffleCb.checked = loadSettings().printShuffle !== false;
     sizeIn.oninput = syncSize;
     labelsCb.onchange = syncLabels;
     syncSize(); syncLabels();
@@ -1938,9 +1943,10 @@
       const showLabels_p = labelsCb.checked;
       const showListName = document.getElementById('po-listname').checked;
       const labelPt      = Number(sizeIn.value);
-      saveSettings({ printLabelPt: labelPt });
+      const shuffle      = shuffleCb.checked;
+      saveSettings({ printLabelPt: labelPt, printShuffle: shuffle });
       dlg.remove();
-      doPrint(list, showHeader, showLabels_p, showListName, labelPt);
+      doPrint(list, showHeader, showLabels_p, showListName, labelPt, shuffle);
     };
 
     // Close on backdrop click
@@ -1950,13 +1956,32 @@
     document.body.insertBefore(backdrop, dlg);
   }
 
-  function doPrint(list, showHeader, showLabels_p, showListName, labelPt) {
+  // Fisher–Yates; for 2+ items, guarantees the result differs from `ref` order.
+  function shuffledCopy(arr, ref) {
+    ref = ref || arr;
+    if (arr.length < 2) return arr.slice();
+    let out;
+    do {
+      out = arr.slice();
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+    } while (out.every((v, i) => v === ref[i]));
+    return out;
+  }
+
+  function doPrint(list, showHeader, showLabels_p, showListName, labelPt, shuffle) {
     const lblPt = isFinite(labelPt) && labelPt > 0 ? labelPt : 7;
     const n = list.kupu.length;
     const cols = n <= 9 ? 3 : n <= 12 ? 4 : 5;
     const overrides = window.kttImageStore ? window.kttImageStore.all() : {};
 
-    const cells = list.kupu.map(kupu => {
+    // Order on the sheet is independent of scoring (responses are recorded by
+    // kupu, not position), so shuffling is safe and stops vowel groups/pairs
+    // from sitting side by side the way they do in list order.
+    const order = shuffle ? shuffledCopy(list.kupu) : list.kupu.slice();
+    const cells = order.map(kupu => {
       const lbl = showLabels_p ? `<div class="lbl">${kupu}</div>` : '';
       // Use custom override if present (base64 data URL), otherwise fall back with onerror chain
       const override = overrides[kupu];
@@ -1999,15 +2024,45 @@
           overflow: hidden;
         }
         .cell img { width: 100%; flex: 1; object-fit: contain; min-height: 0; background: #fff; }
+        .toolbar { position: fixed; right: 12px; bottom: 12px; display: flex; gap: 8px;
+                   background: #fff; border: 1px solid #ccc; border-radius: 10px; padding: 8px;
+                   box-shadow: 0 4px 18px rgba(0,0,0,.18); z-index: 10; }
+        .toolbar button { padding: 8px 14px; border-radius: 6px; border: 1px solid #ccc;
+                          background: #fff; font: 600 13px system-ui, sans-serif; cursor: pointer; }
+        .toolbar button.primary { background: #1a5fa5; border-color: #1a5fa5; color: #fff; }
+        @media print { .toolbar { display: none !important; } }
         .lbl { font-size: ${lblPt}pt; line-height: 1.15; color: #bbb; margin-top: 2px; flex-shrink: 0;
                 text-align: center; max-width: 100%; overflow-wrap: anywhere; }
       </style></head><body>
       ${headerHTML}
-      <div class="grid">${cells}</div>
+      <div class="grid" id="grid">${cells}</div>
+      <div class="toolbar">
+        <button id="tb-shuffle" title="Shuffle the images into a new order">🔀 Reshuffle</button>
+        <button id="tb-print" class="primary">🖨 Print</button>
+      </div>
+      <script>
+        (function () {
+          var grid = document.getElementById('grid');
+          function shuffle() {
+            var cells = Array.prototype.slice.call(grid.children);
+            if (cells.length < 2) return;
+            var out;
+            do {
+              out = cells.slice();
+              for (var i = out.length - 1; i > 0; i--) {
+                var j = Math.floor(Math.random() * (i + 1));
+                var t = out[i]; out[i] = out[j]; out[j] = t;
+              }
+            } while (out.every(function (c, i) { return c === cells[i]; }));
+            out.forEach(function (c) { grid.appendChild(c); });   // moves nodes; no image reload
+          }
+          document.getElementById('tb-shuffle').onclick = shuffle;
+          document.getElementById('tb-print').onclick = function () { window.print(); };
+        })();
+      <\/script>
       </body></html>`);
     win.document.close();
     win.focus();
-    setTimeout(() => win.print(), 600);
   }
 
   // ─── Save results ─────────────────────────────────────────────────────────

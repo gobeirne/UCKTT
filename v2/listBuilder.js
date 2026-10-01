@@ -48,9 +48,9 @@
     mata:    ['māmā','māra','pata'],
     moko:    ['mako'],
     motu:    [],
-    pahi:    ['tahi','mahi'],
+    pahi:    ['tahi','mahi','paki'],
     pai:     ['tai','wai','kai'],
-    paki:    [],
+    paki:    ['pahi'],
     pāpā:    ['pata','māmā'],
     pata:    ['pāpā','mata'],
     pere:    [],
@@ -138,6 +138,12 @@
       words: ['tai', 'motu'] },
     { id: 'sun',      feature: '— paki is the sun, and the tai image has a sun in it',
       words: ['paki', 'tai'] },
+
+    // Look-alikes
+    { id: 'yellow',   feature: 'look similar (yellow 3D shapes)',
+      words: ['pata', 'tīhi'] },
+    { id: 'garden-hat', feature: '— the hēti looks like it could belong in the māra',
+      words: ['hēti', 'māra'] },
 
     // Leaves / feathers
     { id: 'leaf',     feature: 'show leaves (rau can also mean feather)',
