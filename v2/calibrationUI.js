@@ -56,6 +56,16 @@
     document.head.appendChild(s);
   }
 
+  /* Measured hardware combinations. Each figure is the mean maximum output
+     (calibration noise, device volume at maximum) over repeated measurements;
+     ± is the spread across those measurements. A preset is only valid for
+     exactly this sound card + headphone pair, with the device volume at max. */
+  const PRESETS = [
+    { id: 'sbxfi-hd280',  label: 'Sound Blaster X-Fi + Sennheiser HD280 Pro', level: 90.9, sd: 0.9, n: 6, people: 3 },
+    { id: 'ug80154-hd280', label: 'UGREEN UG-80154 + Sennheiser HD280 Pro',   level: 89.3, sd: 1.1, n: 5, people: 2 },
+    { id: 'ug80154-zx110', label: 'UGREEN UG-80154 + Sony MDR-ZX110',         level: 82.9, sd: 0.9, n: 8, people: 3 },
+  ];
+
   function open() {
     injectStyles();
     const cal = window.kttCal;
@@ -67,6 +77,28 @@
     const status = el('div', { cls: 'cal-status' });
     const input  = el('input', { cls: 'cal-input', type: 'number', step: '0.1',
                                  placeholder: 'dB A', inputmode: 'decimal' });
+
+    // ── Preset selector: Manual (measure it) or a measured hardware pair ──
+    const presetSel = el('select', { cls: 'cal-input', style: 'width:100%;font-size:14px' },
+      el('option', { value: 'manual' }, 'Manual (measure with a sound level meter)'),
+      ...PRESETS.map(p => el('option', { value: p.id },
+        `${p.label} = ${p.level} ± ${p.sd} dB A (${p.n} measurements across ${p.people} individuals)`)));
+    const presetNote = el('div', { style: 'font-size:11.5px;color:#7a4a00;margin-top:6px;display:none' },
+      'Only valid for exactly this sound card and these headphones, with the device volume at maximum. ' +
+      'Check it with “Test output level” below if a meter is available.');
+    const manualOnly = [];          // steps that only apply to a manual measurement
+    const syncPreset = () => {
+      const pr = PRESETS.find(p => p.id === presetSel.value);
+      input.disabled = !!pr;
+      if (pr) input.value = String(pr.level);
+      presetNote.style.display = pr ? 'block' : 'none';
+      manualOnly.forEach(n => { n.style.display = pr ? 'none' : ''; });
+      saveBtn.textContent = pr ? 'Use preset' : 'Save calibration';
+    };
+    presetSel.onchange = () => {
+      if (presetSel.value === 'manual') { input.value = ''; }
+      syncPreset();
+    };
 
     const refresh = () => {
       const p = cal.profile();
@@ -168,7 +200,8 @@
       const v = parseFloat(input.value);
       if (!isFinite(v)) { alert('Enter the measured level in dB A.'); return; }
       cal.stopNoise();
-      cal.applyLevel(v);
+      const pr = PRESETS.find(p => p.id === presetSel.value);
+      cal.applyLevel(v, null, pr ? Object.assign({}, pr) : 'manual');
       refresh();
       playBtn.textContent = '▶ Play calibration noise';
       playBtn.className = 'cal-btn primary';
@@ -190,6 +223,12 @@
     closeBtn.onclick = close;
     overlay.onclick = e => { if (e.target === overlay) close(); };
 
+    const s1 = step(1, 'Turn the device volume all the way up and connect it to the audiometer or sound system as it will be used for testing.');
+    const s2 = step(2, 'Play the calibration noise. It is ILTASS-filtered and sits at the mean level of the kupu, so the figure you measure is the speech reference level \u2014 there is no offset to apply.');
+    const s3 = step(3, 'Measure with the sound level meter at the position the child\u2019s head will occupy, then stop the noise and type the reading below.');
+    const playRow = el('div', { cls: 'cal-row' }, playBtn);
+    manualOnly.push(s2, s3, playRow);
+
     modal.append(
       el('h2', {}, 'Calibrate this device'),
       el('div', { style: 'font-size:12px;color:#666' },
@@ -198,10 +237,10 @@
          'Set this device\u2019s volume to MAXIMUM before measuring, and leave it there. ' +
          'Every presentation level is an attenuation below that maximum, so if the volume ' +
          'is lowered afterwards, every level presented will be wrong.'),
-      step(1, 'Turn the device volume all the way up and connect it to the audiometer or sound system as it will be used for testing.'),
-      step(2, 'Play the calibration noise. It is ILTASS-filtered and sits at the mean level of the kupu, so the figure you measure is the speech reference level \u2014 there is no offset to apply.'),
-      step(3, 'Measure with the sound level meter at the position the child\u2019s head will occupy, then stop the noise and type the reading below.'),
-      el('div', { cls: 'cal-row' }, playBtn),
+      el('div', { style: 'margin-top:12px' },
+        el('label', { style: 'font-size:13px;font-weight:600;display:block;margin-bottom:4px' }, 'Calibration'),
+        presetSel, presetNote),
+      s1, s2, s3, playRow,
       el('div', { cls: 'cal-row' },
          el('label', { style: 'font-size:13px' }, 'Measured level:'), input,
          el('span', { style: 'font-size:13px;color:#666' }, 'dB A'), saveBtn),
@@ -210,6 +249,12 @@
       el('div', { cls: 'cal-row' }, clearBtn, el('div', { style: 'flex:1' }), closeBtn),
     );
 
+    // Start on the preset this device was last set with, else Manual.
+    const cur = cal.profile();
+    if (cur.isCalibrated && cur.source && cur.source.id && PRESETS.some(p => p.id === cur.source.id)) {
+      presetSel.value = cur.source.id;
+    }
+    syncPreset();
     refresh();
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
@@ -220,5 +265,5 @@
                                           el('div', {}, text));
   }
 
-  window.kttCalUI = { open, onSaved: null };
+  window.kttCalUI = { open, onSaved: null, PRESETS };
 })();

@@ -104,7 +104,7 @@
   let gateWatchdog = null;
   let gateLinger   = null;     // pending ramp-down, cancelled if the gate re-opens
   let gateDeadline = 0;
-  let cal     = { measuredDbA: null, timestamp: null, isCalibrated: false };
+  let cal     = { measuredDbA: null, timestamp: null, isCalibrated: false, source: null };
   let calNode = null;                 // looping calibration noise source (unity)
   let testNode = null;                // looping test-level source (via presentation gain)
   let calGate  = null;
@@ -623,17 +623,21 @@
 
   // ─── Profile ──────────────────────────────────────────────────────────────
 
-  function applyLevel(level, timestamp) {
+  // source: null/'manual' for a sound-level-meter reading, or a preset
+  // descriptor { id, label, level, sd, n, people } when a measured hardware
+  // combination was chosen instead.
+  function applyLevel(level, timestamp, source) {
     cal.measuredDbA  = Number(level);
     cal.timestamp    = timestamp || new Date().toISOString();
     cal.isCalibrated = true;
+    cal.source       = source || 'manual';
     save();
     notify();
-    log(`calibrated to ${cal.measuredDbA} dB A`);
+    log(`calibrated to ${cal.measuredDbA} dB A` + (source && source.label ? ` (preset: ${source.label})` : ''));
   }
 
   function clear() {
-    cal = { measuredDbA: null, timestamp: null, isCalibrated: false };
+    cal = { measuredDbA: null, timestamp: null, isCalibrated: false, source: null };
     try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
     notify();
   }
@@ -641,7 +645,7 @@
   function save() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        level: cal.measuredDbA, timestamp: cal.timestamp,
+        level: cal.measuredDbA, timestamp: cal.timestamp, source: cal.source,
       }));
     } catch (_) {}
   }
@@ -654,6 +658,7 @@
       if (data && data.level != null) {
         cal.measuredDbA  = Number(data.level);
         cal.timestamp    = data.timestamp || null;
+        cal.source       = data.source || 'manual';
         cal.isCalibrated = true;
         log(`restored calibration: ${cal.measuredDbA} dB A from ${cal.timestamp || 'earlier'}`);
       }
@@ -665,6 +670,7 @@
       isCalibrated: cal.isCalibrated,
       measuredDbA: cal.measuredDbA,
       timestamp: cal.timestamp,
+      source: cal.source,
       maxLevel: maxLevel(),
       minLevel: minLevel(),
       unit: unit(),
@@ -679,7 +685,8 @@
     const when = c.timestamp
       ? new Date(c.timestamp).toLocaleString('en-NZ', { dateStyle: 'short', timeStyle: 'short' })
       : 'unknown date';
-    return `${c.measuredDbA} dB A max, calibrated ${when} — device volume must be at maximum`;
+    const how = c.source && c.source.label ? `preset “${c.source.label}”` : 'measured';
+    return `${c.measuredDbA} dB A max (${how}), set ${when} — device volume must be at maximum`;
   }
 
   function onChange(fn) { listeners.push(fn); }

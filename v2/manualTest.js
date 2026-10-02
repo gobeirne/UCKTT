@@ -2386,6 +2386,9 @@
     const calOk    = !!(usedCal && usedCal.isCalibrated);
     const calLine  = calOk
       ? `Calibrated to a maximum of <strong>${usedCal.measuredDbA} dB(A)</strong>` +
+        (usedCal.source && usedCal.source.label
+          ? ` using the preset for ${usedCal.source.label} (± ${usedCal.source.sd} dB, ${usedCal.source.n} measurements)`
+          : '') +
         (usedCal.timestamp ? ` on ${new Date(usedCal.timestamp).toLocaleString('en-NZ', { dateStyle: 'medium', timeStyle: 'short' })}` : '') +
         `; presentation levels are attenuations below that maximum, with device volume at maximum.`
       : `This device was <strong>not calibrated</strong>: the level control was a dB FS attenuator (unity = 0).`;
