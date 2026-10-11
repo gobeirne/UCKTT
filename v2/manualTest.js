@@ -123,6 +123,11 @@
       labelMode,
       clinicianViewMode,
       pipCount,
+      presentations,      // kept so a restored session doesn't lose RTs / confusions
+      responses,
+      // Which participant/list this was, so restoring it can't pick up a
+      // different child's study context.
+      studyCurrent: window.kttStudy?.getCurrent?.() || null,
     };
 
     const existing = loadSessions().filter(s => s.sessionId !== currentSessionId);
@@ -148,6 +153,10 @@
     if (session.labelMode) labelMode = session.labelMode;
     else if (session.showLabels !== undefined) labelMode = session.showLabels ? 'both' : 'off';
     clinicianViewMode = session.clinicianViewMode || 'words';
+    presentations     = session.presentations || [];
+    window.kttStudy?.setCurrent?.(session.studyCurrent || null);
+    if (session.studyCurrent) sessionMeta.clientName = 'P' + String(session.studyCurrent.participant).padStart(3, '0');
+    responses         = session.responses || [];
     currentSessionId  = session.sessionId;
     armedKupu         = null;
     saveSettings({ activeListId, scoringMode, labelMode, clinicianViewMode });

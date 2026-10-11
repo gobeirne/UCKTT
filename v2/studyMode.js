@@ -274,6 +274,13 @@
     };
   }
   function clearCurrent() { if (load().current) save({ current: null }); }
+  function getCurrent() { const s = load(); return s.enabled ? s.current : null; }
+  function setCurrent(c) {
+    // A restored session from before a "Start fresh" must not attach itself
+    // to a participant who no longer exists in the study record.
+    if (c && !load().assignments[String(c.participant)]) c = null;
+    save({ current: c || null });
+  }
   function onSaved(list) {
     const s = activeFor(list);
     if (!s) return;
@@ -452,7 +459,7 @@
        • Merge   — combine two devices' records (union; conflicts reported).
        • Rebuild from results files — every saved result carries its child's
          assignment, so the history can be reconstructed if a device is lost. */
-  function exportState() {
+  function exportState(suffix) {
     const s = load();
     const data = {
       type: 'ktt-study', version: 2, exported_at: new Date().toISOString(),
@@ -463,7 +470,8 @@
     };
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
-    a.download = `KTT_study_${s.name.replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `KTT_study_${s.name.replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}` +
+                 (typeof suffix === 'string' ? `_${suffix}` : '') + '.json';
     a.click(); URL.revokeObjectURL(a.href);
     save({ exportedAt: Date.now(), changesSinceExport: 0 });
   }
@@ -590,7 +598,84 @@
         h('button', { cls: n ? 'mt-btn-sm-primary' : 'mt-btn', style: 'flex:1;font-size:12px', onclick: () => { exportState(); rerender(); } }, '⬇ Export study'),
         h('button', { cls: 'mt-btn', style: 'flex:1;font-size:12px', onclick: () => importState(rerender) }, '⬆ Import / restore…')),
       h('div', { style: `font-size:10px;margin-top:3px;color:${n ? '#a02020' : '#667'}` },
-        `Last export: ${when}` + (n ? ` — ${n} change${n === 1 ? '' : 's'} not exported` : '')));
+        `Last export: ${when}` + (n ? ` — ${n} change${n === 1 ? '' : 's'} not exported` : '')),
+      (Object.keys(s.assignments).length || Object.keys(s.done).length)
+        ? h('button', { cls: 'mt-btn', style: 'width:100%;margin-top:8px;font-size:11px;color:#c0392b;border-color:#e0b0b0',
+            onclick: () => startFresh(rerender) }, '⟲ Start fresh (clear study record)…')
+        : '');
+  }
+
+  // ─── Start fresh ───────────────────────────────────────────────────────────
+  // Wipes the study record (assignments, ticks, DOBs, participant counter) but
+  // keeps the study's settings. A backup export is downloaded first, always.
+  function startFresh(rerender) {
+    const s = load();
+    const nP = Object.keys(s.assignments).length;
+    const nSaved = Object.values(s.done).reduce((n, ids) => n + ids.length, 0);
+    const nChg = s.changesSinceExport || 0;
+    const PHRASE = 'START FRESH';
+
+    const ov = h('div', { id: 'ktt-start-fresh', style: 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9400;display:flex;align-items:center;justify-content:center;padding:16px;font-family:system-ui,sans-serif' });
+    const li = t => h('li', { style: 'margin:2px 0' }, t);
+    const typed = h('input', { cls: 'mt-inp', placeholder: PHRASE, autocomplete: 'off', style: 'width:100%;margin-top:4px;text-transform:uppercase;box-sizing:border-box' });
+    const ack = h('input', { type: 'checkbox' });
+    const goBtn = h('button', { style: 'padding:10px;border:none;border-radius:8px;background:#e8b4b4;color:#fff;font-size:14px;font-weight:700;cursor:not-allowed' }, 'Start fresh');
+    goBtn.disabled = true;
+    const sync = () => {
+      const ok = ack.checked && typed.value.trim().toUpperCase() === PHRASE;
+      goBtn.disabled = !ok;
+      goBtn.style.background = ok ? '#c0392b' : '#e8b4b4';
+      goBtn.style.cursor = ok ? 'pointer' : 'not-allowed';
+    };
+    typed.oninput = sync; ack.onchange = sync;
+
+    const stat = (n, t, warn) => h('div', { style: `flex:1;text-align:center;border:1px solid #eee;border-radius:8px;padding:6px;background:${warn && n ? '#fdecea' : '#fafafa'}` },
+      h('div', { style: 'font-size:20px;font-weight:700' }, String(n)),
+      h('div', { style: 'font-size:11px;color:#666' }, t));
+
+    const box = h('div', { style: 'background:#fff;border-radius:12px;padding:22px;max-width:440px;width:100%;max-height:90vh;overflow:auto;box-shadow:0 6px 36px rgba(0,0,0,.25)' },
+      h('div', { style: 'font-size:18px;font-weight:700;color:#a02020;margin-bottom:8px' }, '⚠ Start fresh?'),
+      h('div', { style: 'font-size:13.5px;color:#333;line-height:1.5' },
+        `This permanently clears the study record for “${s.name}” on this tablet:`),
+      h('div', { style: 'display:flex;gap:8px;margin:10px 0' },
+        stat(nP, 'participants assigned'), stat(nSaved, 'lists saved'), stat(nChg, 'changes not exported', true)),
+      h('div', { style: 'font-size:13px;font-weight:600;margin-top:6px' }, 'Cleared from the app:'),
+      h('ul', { style: 'font-size:13px;color:#444;margin:4px 0 8px 18px;padding:0' },
+        li('which lists each child was given, and in what order'),
+        li('the ✓ ticks showing which lists were saved'),
+        li('dates of birth entered here'),
+        li('the balance history: the next child becomes P001 and lists are balanced from scratch')),
+      h('div', { style: 'font-size:13px;font-weight:600' }, 'Kept:'),
+      h('ul', { style: 'font-size:13px;color:#444;margin:4px 0 8px 18px;padding:0' },
+        li('results files already downloaded (nothing in Downloads is touched)'),
+        li('study name, lists in the mix and kupu-order setting'),
+        li('calibration and all other app settings')),
+      h('div', { style: 'font-size:12.5px;background:#fff8e1;border:1px solid #f0d080;border-radius:8px;padding:8px 10px;margin:8px 0;line-height:1.45' },
+        'Use this only before real data collection begins (e.g. to clear practice runs), or to begin a new study. ',
+        h('b', {}, 'Never mid-study'),
+        ': children already tested would stop counting towards the balance, and new children would reuse their participant numbers.'),
+      h('div', { style: 'font-size:12.5px;color:#2d5a10;margin-bottom:10px' },
+        '⬇ A backup of the current record is downloaded automatically before anything is cleared. It can be put back with Import / restore.'),
+      h('label', { style: 'display:flex;gap:8px;align-items:flex-start;font-size:13px;cursor:pointer;margin-bottom:8px' },
+        ack, h('span', {}, 'I understand this clears the study record on this tablet and should only be done before real data collection.')),
+      h('div', { style: 'font-size:13px' }, 'Type ', h('b', {}, PHRASE), ' to confirm:'),
+      typed);
+    const cancel = h('button', { style: 'padding:10px;border:1px solid #1a5fa5;border-radius:8px;background:#1a5fa5;color:#fff;font-size:14px;font-weight:700;cursor:pointer',
+      onclick: () => ov.remove() }, 'Cancel — keep the study record');
+    goBtn.onclick = () => {
+      if (goBtn.disabled) return;
+      exportState('before-start-fresh');        // safety copy, always
+      save({ assignments: {}, done: {}, current: null, participant: 1, pendingDob: '' });
+      save({ changesSinceExport: 0 });          // a fresh record has nothing unexported
+      ov.remove();
+      rerender();
+      alert('Study record cleared. A backup was downloaded first. The next child is P001.');
+    };
+    box.append(h('div', { style: 'display:flex;flex-direction:column;gap:8px;margin-top:14px' }, cancel, goBtn));
+    ov.append(box);
+    ov.onclick = e => { if (e.target === ov) ov.remove(); };
+    document.body.append(ov);
+    cancel.focus();
   }
 
   // Running totals, so the balance is visible at a glance.
@@ -615,7 +700,7 @@
 
   window.kttStudy = {
     renderCard, clinicianOrder, childGridOrder, badge, resultBlock,
-    clearCurrent, onSaved, isOn: () => load().enabled,
+    clearCurrent, getCurrent, setCurrent, onSaved, isOn: () => load().enabled,
     exportState, _fromResults: fromResults, _mergeInto: mergeInto, _fillKupuRows: fillKupuRows,
     _williams: williams, _assign: assign, _load: load, _tallies: tallies, _addOne: addOne, _stopHere: stopHere,
   };
