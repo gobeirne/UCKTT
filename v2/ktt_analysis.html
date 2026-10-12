@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KTT Results Analysis</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f3f0;
+  --surface-1: #fcfcfb;
+  --surface-2: #f0efeb;
+  --border:    #e2e0da;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #7a7873;
+  --accent:    #1c5cab;
+  --series-1:  #2a78d6;
+  --series-1-soft: #b7d3f6;
+  --grid:      #e6e4de;
+  --warn-bg:   #fff6e0;
+  --warn-bd:   #ecd08c;
+  --warn-tx:   #6b4a00;
+  --ok-tx:     #1d6b1d;
+  --bad-tx:    #a02525;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #121211;
+    --surface-1: #1a1a19;
+    --surface-2: #232321;
+    --border:    #34332f;
+    --text-primary:   #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #94928a;
+    --accent:    #86b6ef;
+    --series-1:  #3987e5;
+    --series-1-soft: #184f95;
+    --grid:      #2e2d2a;
+    --warn-bg:   #2e2510;
+    --warn-bd:   #6b5520;
+    --warn-tx:   #f0d48a;
+    --ok-tx:     #7fcf7f;
+    --bad-tx:    #f08a8a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #121211; --surface-1: #1a1a19; --surface-2: #232321; --border: #34332f;
+  --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #94928a;
+  --accent: #86b6ef; --series-1: #3987e5; --series-1-soft: #184f95; --grid: #2e2d2a;
+  --warn-bg: #2e2510; --warn-bd: #6b5520; --warn-tx: #f0d48a; --ok-tx: #7fcf7f; --bad-tx: #f08a8a;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 2px; letter-spacing: -0.01em; }
+h2 { font-size: 16px; margin: 0 0 4px; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.muted { color: var(--text-muted); }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-top: 16px; }
+.card-head { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; margin-bottom: 10px; }
+.note { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+
+#drop {
+  margin-top: 16px; border: 2px dashed var(--border); border-radius: 12px; background: var(--surface-1);
+  padding: 22px 16px; text-align: center; transition: border-color .15s, background .15s;
+}
+#drop.over { border-color: var(--series-1); background: var(--surface-2); }
+#drop b { font-size: 15px; }
+button, select {
+  font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px; cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface-1); font-weight: 600; }
+button:hover, select:hover { border-color: var(--text-muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+label.ctl { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--text-secondary); }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.tile .v { font-size: 24px; font-weight: 700; letter-spacing: -0.01em; }
+.tile .l { font-size: 12px; color: var(--text-secondary); }
+
+.tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: middle; }
+th { font-size: 12px; font-weight: 600; color: var(--text-secondary); background: var(--surface-1); position: sticky; top: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover td { background: var(--surface-2); }
+td.k { font-weight: 600; }
+td.wrap { white-space: normal; min-width: 140px; }
+.miss { display: inline-block; margin: 1px 4px 1px 0; padding: 0 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font-size: 11.5px; }
+.strip { display: block; }
+.axis-lbl { font-size: 10px; fill: var(--text-muted); }
+
+.warn { background: var(--warn-bg); border: 1px solid var(--warn-bd); color: var(--warn-tx); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-top: 8px; }
+.okline { color: var(--ok-tx); font-size: 13px; }
+ul.checks { margin: 6px 0 0 18px; padding: 0; font-size: 13px; }
+ul.checks li { margin: 3px 0; }
+
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none;
+  background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 10px; font-size: 12px; box-shadow: 0 4px 18px rgba(0,0,0,.15); max-width: 260px;
+}
+.hidden { display: none !important; }
+@media (max-width: 600px) { main { padding: 16px 16px 48px; } h1 { font-size: 19px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Te reo Māori KTT · results analysis</h1>
+  <div class="sub">Drop in KTT results files (and optionally the study export). Everything runs on this computer; no data is uploaded anywhere.</div>
+
+  <div id="drop">
+    <b>Drag and drop KTT .json files here</b>
+    <div class="sub" style="margin:4px 0 10px">Results files <span class="muted">(KTT_…_P001_L1_….json)</span> and the study export <span class="muted">(KTT_study_….json)</span>. Select many at once.</div>
+    <div class="row" style="justify-content:center">
+      <button class="primary" id="pick">Choose files…</button>
+      <button id="clear">Clear all</button>
+    </div>
+    <input type="file" id="files" accept=".json,application/json" multiple class="hidden">
+    <div id="loaded" class="note"></div>
+  </div>
+
+  <div id="out" class="hidden">
+    <div class="card">
+      <div class="row">
+        <label class="ctl">Scoring
+          <select id="opt-score">
+            <option value="first">First scored presentation of each kupu</option>
+            <option value="all">All scored presentations</option>
+          </select>
+        </label>
+        <label class="ctl" id="lvl-wrap">Level <select id="opt-level"></select></label>
+        <label class="ctl">Age <select id="opt-age"></select></label>
+      </div>
+      <div class="note">“No response” counts as not correct. Presentations played but never scored (replays) are not trials.</div>
+    </div>
+
+    <div class="tiles" id="tiles" style="margin-top:16px"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Per kupu</h2><div class="sub">Proportion correct across administrations, with 95% Wilson confidence interval.</div></div>
+        <div class="row">
+          <label class="ctl">Sort <select id="opt-sort">
+            <option value="hard">Hardest first</option>
+            <option value="alpha">A–Z</option>
+            <option value="vowel">By vowel</option>
+            <option value="n">Most tested</option>
+          </select></label>
+          <label class="ctl"><input type="checkbox" id="opt-byage"> Split by age</label>
+          <button id="dl-kupu">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="tbl-wrap"><table id="t-kupu"></table></div>
+      <div class="note" id="kupu-note"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Per child</h2><div class="sub">Lists in the order they were presented.</div></div>
+        <button id="dl-child">⬇ CSV</button>
+      </div>
+      <div class="tbl-wrap"><table id="t-child"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div><h2>Score by age</h2><div class="sub">Each dot is one child: % correct across all their lists.</div></div></div>
+      <div id="age-plot"></div>
+      <div class="note" id="age-note"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div><h2>Per list</h2><div class="sub">Are the lists equally hard? Mean % correct per administration.</div></div></div>
+      <div class="tbl-wrap"><table id="t-list"></table></div>
+      <div class="tbl-wrap" style="margin-top:12px"><table id="t-order"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><div><h2>Data checks</h2></div><button id="dl-trials">⬇ Trial-level CSV</button></div>
+      <div id="checks"></div>
+    </div>
+  </div>
+</main>
+<div id="tip"></div>
+
+<script>
+(() => {
+'use strict';
+
+// ── Reference data ─────────────────────────────────────────────────────────
+// Vowel categories from the KTT list builder (a kupu sits under every vowel it contains).
+const VOWEL_GROUPS = [
+  ['/a/',  ['taraka','karaka','māmā','māra','tāra','mata','pata','pāpā','haka','waka','mahi','pahi','paki','tahi','mako','manu']],
+  ['/e/',  ['hēki','hēti','keke','wheke','pere','kōrero']],
+  ['/i/',  ['kīngi','rīngi','rīhi','tīhi','ihu','inu','ipu','koti','poti','mahi','pahi','paki','tahi','hēki','hēti','kōtiro','tōtiti']],
+  ['/o/',  ['koro','roro','mako','moko','kōrero','kōtiro','tōtiti','koti','poti','motu']],
+  ['/u/',  ['hū','kutu','manu','motu','ihu','inu','ipu']],
+  ['/ai/', ['kai','pai','tai','wai']],
+  ['/ae/', ['taea','waea','whaea']],
+  ['/au/', ['kau','rau','tau']],
+];
+const VOWEL_ORDER = VOWEL_GROUPS.map(g => g[0]);
+const vowelsOf = k => VOWEL_GROUPS.filter(g => g[1].includes(k)).map(g => g[0]);
+
+// ── State ──────────────────────────────────────────────────────────────────
+const raw = [];            // { name, size, data }
+const $ = id => document.getElementById(id);
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const pct = (a, b) => b ? 100 * a / b : NaN;
+const f0 = x => Number.isFinite(x) ? x.toFixed(0) : '—';
+function wilson(k, n) {
+  if (!n) return [NaN, NaN];
+  const z = 1.959964, p = k / n, d = 1 + z * z / n;
+  const c = (p + z * z / (2 * n)) / d, h = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d;
+  return [100 * Math.max(0, c - h), 100 * Math.min(1, c + h)];
+}
+function parseDob(s) {
+  const m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/.exec(String(s || '').trim());
+  if (!m) return null;
+  const d = new Date(+m[3], +m[2] - 1, +m[1]);
+  return isNaN(d) ? null : d;
+}
+function ageMonths(dob, at) {
+  if (!dob || !at) return null;
+  let mo = (at.getFullYear() - dob.getFullYear()) * 12 + (at.getMonth() - dob.getMonth());
+  if (at.getDate() < dob.getDate()) mo--;
+  return mo >= 0 ? mo : null;
+}
+const ym = mo => mo == null ? '—' : `${Math.floor(mo / 12)};${String(mo % 12).padStart(2, '0')}`;
+const fmtDate = d => d ? d.toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+function pearson(xs, ys) {
+  const n = xs.length; if (n < 3) return NaN;
+  const mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; syy += (ys[i] - my) ** 2; }
+  return sxx && syy ? sxy / Math.sqrt(sxx * syy) : NaN;
+}
+function csv(rows) {
+  return '﻿' + rows.map(r => r.map(v => {
+    if (v == null || (typeof v === 'number' && !Number.isFinite(v))) return '';
+    const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n') + '\n';
+}
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ── Tooltip ────────────────────────────────────────────────────────────────
+const tip = $('tip');
+document.addEventListener('mousemove', e => {
+  const t = e.target.closest('[data-tip]');
+  if (!t) { tip.style.display = 'none'; return; }
+  tip.innerHTML = t.getAttribute('data-tip');
+  tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  let x = e.clientX + 14, y = e.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = e.clientY - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+});
+
+// ── Loading ────────────────────────────────────────────────────────────────
+async function addFiles(fileList) {
+  const files = Array.from(fileList || []);   // copy: the input's FileList is live and gets cleared
+  let bad = [];
+  for (const f of files) {
+    if (raw.some(r => r.name === f.name && r.size === f.size)) continue;
+    try { raw.push({ name: f.name, size: f.size, data: JSON.parse(await f.text()) }); }
+    catch { bad.push(f.name); }
+  }
+  if (bad.length) alert('Could not read: ' + bad.join(', '));
+  render();
+}
+$('pick').onclick = () => $('files').click();
+$('files').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
+$('clear').onclick = () => { raw.length = 0; render(); };
+const drop = $('drop');
+['dragenter', 'dragover'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); if (ev === 'drop' || e.target === document.documentElement) drop.classList.remove('over'); }));
+document.addEventListener('drop', e => { if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
+['opt-score', 'opt-level', 'opt-age', 'opt-sort', 'opt-byage'].forEach(id => $(id).onchange = () => render(true));
+
+// ── Build the dataset from the loaded files ────────────────────────────────
+function build() {
+  const studies = raw.filter(r => r.data?.type === 'ktt-study');
+  const results = raw.filter(r => r.data?.test && r.data?.scores);
+  const ignored = raw.filter(r => !studies.includes(r) && !results.includes(r)).map(r => r.name);
+  const study = studies.length ? studies.reduce((a, b) => (a.data.exported_at > b.data.exported_at ? a : b)).data : null;
+  const listNames = {};
+  (study?.lists || []).forEach(l => { listNames[l.id] = l.name; });
+
+  // One session = one list started at one moment. Two files for the same session
+  // (saved twice) are merged: keep the most recent, borrow a study block from any copy.
+  const sessions = new Map(), dupes = [];
+  results.forEach(r => {
+    const d = r.data;
+    const t0 = d.presentations?.[0]?.t ?? null;
+    const who = d.study?.participant_code || d.client?.clientName || '';
+    const key = t0 != null ? `${d.test.list_id}|${t0}` : `${d.test.list_id}|${who}|${JSON.stringify(d.scores)}`;
+    const prev = sessions.get(key);
+    if (!prev) { sessions.set(key, { file: r.name, data: d, study: d.study || null }); return; }
+    // Identical copies: keep the one carrying study information. If one copy has
+    // more scoring (testing continued after the first save), keep the newer one.
+    const same = JSON.stringify(d.scores) === JSON.stringify(prev.data.scores);
+    const newer = same ? (!prev.data.study && !!d.study) : (d.exported_at || '') > (prev.data.exported_at || '');
+    const keep = newer ? { file: r.name, data: d } : prev;
+    const drop = newer ? prev.file : r.name;
+    sessions.set(key, { file: keep.file, data: keep.data, study: prev.study || d.study || null });
+    dupes.push(drop);
+  });
+
+  // Participants: code, DOB (study export first, then any file that has one).
+  const kids = new Map();
+  const kid = code => { if (!kids.has(code)) kids.set(code, { code, dob: null, dobSrc: null, adms: [] }); return kids.get(code); };
+  if (study) Object.entries(study.state.assignments || {}).forEach(([p, a]) => {
+    const k = kid('P' + String(p).padStart(3, '0'));
+    if (parseDob(a.dob)) { k.dob = parseDob(a.dob); k.dobSrc = 'study'; }
+  });
+
+  const adms = [], noStudy = [];
+  sessions.forEach(s => {
+    const d = s.data, st = s.study;
+    const code = st?.participant_code || d.client?.clientName || s.file;
+    if (!st) noStudy.push(s.file);
+    const k = kid(code);
+    if (!k.dob) {
+      const dob = parseDob(st?.dob) || parseDob(d.client?.dob);
+      if (dob) { k.dob = dob; k.dobSrc = 'file'; }
+    }
+    const tTest = d.presentations?.[0]?.t ? new Date(d.presentations[0].t) : (d.exported_at ? new Date(d.exported_at) : null);
+    const order = st?.kupu_order || null;
+    const trials = [];
+    Object.entries(d.scores || {}).forEach(([kupu, byLevel]) => {
+      Object.entries(byLevel).forEach(([lv, rec]) => {
+        let att = 0, empties = 0;
+        (rec.pips || []).forEach(state => {
+          if (state === 'empty') { empties++; return; }
+          trials.push({ kupu, level: Number(lv), state, correct: state === 'correct' ? 1 : 0, attempt: ++att,
+                        pos: order ? (order.indexOf(kupu) + 1 || null) : null });
+        });
+        if (empties) trials.push({ kupu, level: Number(lv), state: 'empty', empties });
+      });
+    });
+    const adm = {
+      code, file: s.file, listId: d.test.list_id,
+      listName: listNames[d.test.list_id] || d.test.list_name || d.test.list_id,
+      seq: st?.sequence_position ?? null, of: st?.lists_assigned ?? null,
+      tTest, kupu: d.test.kupu || [], trials, unit: d.presentations?.[0]?.unit || 'dB',
+      cal: d.calibration?.[d.calibration?.audio_source === 'responder' ? 'responder' : 'clinician'] || null,
+    };
+    adms.push(adm); k.adms.push(adm);
+  });
+  kids.forEach(k => {
+    k.adms.sort((a, b) => (a.seq ?? 99) - (b.seq ?? 99) || (a.tTest - b.tTest));
+    const first = k.adms[0]?.tTest || null;
+    k.ageMo = ageMonths(k.dob, first);
+    k.adms.forEach(a => { a.ageMo = ageMonths(k.dob, a.tTest); });
+  });
+  // Children only in the study record with nothing loaded aren't shown as children.
+  [...kids.keys()].forEach(c => { if (!kids.get(c).adms.length) kids.delete(c); });
+
+  // Study record vs files loaded.
+  const missing = [];
+  if (study) {
+    Object.entries(study.state.done || {}).forEach(([p, ids]) => {
+      const code = 'P' + String(p).padStart(3, '0');
+      ids.forEach(id => {
+        if (!adms.some(a => a.code === code && a.listId === id)) missing.push(`${code} · ${listNames[id] || id}`);
+      });
+    });
+  }
+  return { study, adms, kids, dupes, noStudy, ignored, missing, nResults: results.length };
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+let DS = null;
+function render(optsOnly) {
+  if (!optsOnly) DS = build();
+  const ds = DS;
+  $('loaded').textContent = raw.length
+    ? `${raw.length} file${raw.length === 1 ? '' : 's'} loaded: ${ds.nResults} results, ${ds.study ? 'study export ✓' : 'no study export'}.`
+    : '';
+  $('out').classList.toggle('hidden', !ds.adms.length);
+  if (!ds.adms.length) return;
+
+  // Option lists (rebuilt on load, keep selections).
+  const levels = [...new Set(ds.adms.flatMap(a => a.trials.filter(t => t.state !== 'empty').map(t => t.level)))].sort((a, b) => a - b);
+  const unit = ds.adms[0].unit;
+  const lvlSel = $('opt-level'), prevL = lvlSel.value;
+  lvlSel.innerHTML = (levels.length > 1 ? '<option value="all">All levels</option>' : '') +
+    levels.map(l => `<option value="${l}">${l} ${esc(unit)}</option>`).join('');
+  lvlSel.value = [...lvlSel.options].some(o => o.value === prevL) ? prevL : lvlSel.options[0].value;
+  const years = [...new Set([...ds.kids.values()].map(k => k.ageMo == null ? 'unknown' : Math.floor(k.ageMo / 12)))]
+    .sort((a, b) => (a === 'unknown') - (b === 'unknown') || a - b);
+  const ageSel = $('opt-age'), prevA = ageSel.value;
+  ageSel.innerHTML = '<option value="all">All ages</option>' +
+    years.map(y => `<option value="${y}">${y === 'unknown' ? 'Age unknown' : y + ' years'}</option>`).join('');
+  ageSel.value = [...ageSel.options].some(o => o.value === prevA) ? prevA : 'all';
+
+  const scoring = $('opt-score').value, lvl = lvlSel.value, ageF = ageSel.value;
+  const yearOf = k => k.ageMo == null ? 'unknown' : Math.floor(k.ageMo / 12);
+  const kidsIn = [...ds.kids.values()].filter(k => ageF === 'all' || String(yearOf(k)) === ageF)
+    .sort((a, b) => a.code.localeCompare(b.code));
+  const inLevel = t => t.state !== 'empty' && (lvl === 'all' || t.level === Number(lvl));
+  const use = t => inLevel(t) && (scoring === 'all' || t.attempt === 1);
+
+  // Units of analysis: each scored trial (first attempt per kupu per level, or all).
+  const units = [];
+  kidsIn.forEach(k => k.adms.forEach(a => a.trials.filter(use).forEach(t => units.push({ k, a, t }))));
+
+  // ── Tiles
+  const nC = units.filter(u => u.t.correct).length;
+  const ages = kidsIn.map(k => k.ageMo).filter(x => x != null);
+  const levelsTxt = levels.map(l => `${l}`).join(', ') + ' ' + unit;
+  $('tiles').innerHTML = [
+    [kidsIn.length, 'children'],
+    [kidsIn.reduce((n, k) => n + k.adms.length, 0), 'lists administered'],
+    [units.length, scoring === 'first' ? 'kupu scored (first presentation)' : 'presentations scored'],
+    [`${f0(pct(nC, units.length))}%`, 'correct overall'],
+    [ages.length ? `${ym(Math.min(...ages))} – ${ym(Math.max(...ages))}` : '—', 'age range (y;m)'],
+    [levelsTxt, levels.length > 1 ? 'levels' : 'presentation level'],
+  ].map(([v, l]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
+
+  renderKupu(units, kidsIn, yearOf);
+  renderChildren(kidsIn, use);
+  renderAge(kidsIn, use);
+  renderLists(kidsIn, use);
+  renderChecks(ds, kidsIn);
+  $('dl-trials').onclick = () => download('ktt_trials.csv', csv([
+    ['participant', 'age_months', 'list', 'list_position', 'kupu', 'vowels', 'position_in_list', 'level', 'attempt', 'response', 'correct', 'file'],
+    ...[...ds.kids.values()].flatMap(k => k.adms.flatMap(a => a.trials.filter(t => t.state !== 'empty').map(t =>
+      [k.code, a.ageMo, a.listName, a.seq, t.kupu, vowelsOf(t.kupu).join(' '), t.pos, t.level, t.attempt, t.state, t.correct, a.file]))),
+  ]));
+}
+
+// ── Per kupu ───────────────────────────────────────────────────────────────
+function renderKupu(units, kidsIn, yearOf) {
+  const by = new Map();
+  units.forEach(({ k, a, t }) => {
+    if (!by.has(t.kupu)) by.set(t.kupu, { kupu: t.kupu, n: 0, c: 0, inc: 0, nr: 0, kids: new Set(), lists: new Set(), miss: [], age: {} });
+    const r = by.get(t.kupu);
+    r.n++; r.c += t.correct; r.kids.add(k.code); r.lists.add(a.listName);
+    if (t.state === 'incorrect') r.inc++;
+    if (t.state === 'noresponse') r.nr++;
+    if (!t.correct) r.miss.push({ code: k.code, state: t.state, list: a.listName });
+    const y = yearOf(k); (r.age[y] ||= { n: 0, c: 0 }); r.age[y].n++; r.age[y].c += t.correct;
+  });
+  const rows = [...by.values()].map(r => Object.assign(r, { p: pct(r.c, r.n), ci: wilson(r.c, r.n), v: vowelsOf(r.kupu) }));
+  const sort = $('opt-sort').value;
+  const vIdx = r => Math.min(...r.v.map(v => VOWEL_ORDER.indexOf(v)).filter(i => i >= 0), 99);
+  rows.sort({
+    hard:  (a, b) => a.p - b.p || b.n - a.n || a.kupu.localeCompare(b.kupu, 'mi'),
+    alpha: (a, b) => a.kupu.localeCompare(b.kupu, 'mi'),
+    vowel: (a, b) => vIdx(a) - vIdx(b) || a.kupu.localeCompare(b.kupu, 'mi'),
+    n:     (a, b) => b.n - a.n || a.p - b.p,
+  }[sort]);
+
+  const byAge = $('opt-byage').checked;
+  const years = [...new Set(kidsIn.map(yearOf))].sort((a, b) => (a === 'unknown') - (b === 'unknown') || a - b);
+  const W = 170, X = v => 6 + (W - 12) * v / 100;
+  const axis = `<svg class="strip" width="${W}" height="14" aria-hidden="true">
+      ${[0, 50, 100].map(v => `<text class="axis-lbl" x="${X(v)}" y="11" text-anchor="${v === 0 ? 'start' : v === 100 ? 'end' : 'middle'}">${v}%</text>`).join('')}
+    </svg>`;
+  const strip = r => {
+    const [lo, hi] = r.ci;
+    const tipTxt = `<b>${esc(r.kupu)}</b><br>${r.c} of ${r.n} correct (${f0(r.p)}%)<br>95% CI ${f0(lo)}–${f0(hi)}%`;
+    return `<svg class="strip" width="${W}" height="18" data-tip="${esc(tipTxt)}" role="img" aria-label="${esc(r.kupu)} ${f0(r.p)} percent">
+      <rect x="0" y="0" width="${W}" height="18" fill="transparent"/>
+      ${[0, 50, 100].map(v => `<line x1="${X(v)}" x2="${X(v)}" y1="3" y2="15" stroke="var(--grid)" stroke-width="1"/>`).join('')}
+      <line x1="${X(lo)}" x2="${X(hi)}" y1="9" y2="9" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+      <circle cx="${X(r.p)}" cy="9" r="4.5" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2"/>
+    </svg>`;
+  };
+  const short = s => String(s).replace(/^New List /, 'L');
+  const missTxt = r => {
+    const twice = new Set(r.miss.map(m => m.code).filter((c, i, a) => a.indexOf(c) !== i));
+    return r.miss.map(m => `<span class="miss" title="${esc(m.list)}">${esc(m.code)}${twice.has(m.code) ? ' · ' + esc(short(m.list)) : ''}${m.state === 'noresponse' ? ' (no resp.)' : ''}</span>`).join('') || '<span class="muted">—</span>';
+  };
+
+  $('t-kupu').innerHTML = `
+    <thead><tr>
+      <th>Kupu</th><th>Vowels</th><th>List(s)</th><th class="num">Children</th><th class="num">n</th>
+      <th class="num">Correct</th><th class="num">Incorrect</th><th class="num">No resp.</th>
+      <th class="num">% correct</th><th class="num">95% CI</th><th>${axis}</th>
+      ${byAge ? years.map(y => `<th class="num">${y === 'unknown' ? 'Age ?' : y + ' y'}</th>`).join('') : ''}
+      <th>Not correct for</th>
+    </tr></thead>
+    <tbody>${rows.map(r => `<tr>
+      <td class="k">${esc(r.kupu)}</td><td class="muted">${r.v.join(' ')}</td>
+      <td class="muted">${esc([...r.lists].map(s => s.replace(/^New List /, 'L')).join(', '))}</td>
+      <td class="num">${r.kids.size}</td><td class="num">${r.n}</td>
+      <td class="num">${r.c}</td><td class="num">${r.inc}</td><td class="num">${r.nr}</td>
+      <td class="num"><b>${f0(r.p)}</b></td><td class="num muted">${f0(r.ci[0])}–${f0(r.ci[1])}</td>
+      <td>${strip(r)}</td>
+      ${byAge ? years.map(y => { const a = r.age[y]; return `<td class="num">${a ? `${f0(pct(a.c, a.n))}% <span class="muted">(${a.n})</span>` : '<span class="muted">—</span>'}</td>`; }).join('') : ''}
+      <td class="wrap">${missTxt(r)}</td>
+    </tr>`).join('')}</tbody>`;
+  const notTested = [...new Set(DS.adms.flatMap(a => a.kupu))].filter(k => !by.has(k));
+  const small = rows.filter(r => r.n < 5).length;
+  $('kupu-note').innerHTML =
+    `${rows.length} kupu. With few children per kupu the intervals are wide: a kupu scored 3/3 has a 95% CI of 44–100%, so treat rankings as provisional until each kupu has roughly 15–20 administrations.` +
+    (small ? ` ${small} kupu currently have fewer than 5.` : '') +
+    (notTested.length ? ` Not yet tested in this selection: ${esc(notTested.join(', '))}.` : '');
+
+  $('dl-kupu').onclick = () => download('ktt_per_kupu.csv', csv([
+    ['kupu', 'vowels', 'lists', 'children', 'n', 'correct', 'incorrect', 'no_response', 'pct_correct', 'ci95_low', 'ci95_high', 'not_correct_for',
+      ...years.map(y => `pct_${y}y`), ...years.map(y => `n_${y}y`)],
+    ...rows.map(r => [r.kupu, r.v.join(' '), [...r.lists].join('; '), r.kids.size, r.n, r.c, r.inc, r.nr,
+      r.p.toFixed(1), r.ci[0].toFixed(1), r.ci[1].toFixed(1), r.miss.map(m => m.code).join(' '),
+      ...years.map(y => r.age[y] ? pct(r.age[y].c, r.age[y].n).toFixed(1) : ''), ...years.map(y => r.age[y]?.n ?? '')]),
+  ]));
+}
+
+// ── Per child ──────────────────────────────────────────────────────────────
+function childScore(k, use) {
+  const per = k.adms.map(a => { const ts = a.trials.filter(use); return { a, n: ts.length, c: ts.filter(t => t.correct).length }; });
+  const n = per.reduce((s, x) => s + x.n, 0), c = per.reduce((s, x) => s + x.c, 0);
+  return { per, n, c, p: pct(c, n) };
+}
+function renderChildren(kidsIn, use) {
+  const maxL = Math.max(...kidsIn.map(k => k.adms.length));
+  const rows = kidsIn.map(k => ({ k, s: childScore(k, use) }));
+  $('t-child').innerHTML = `
+    <thead><tr><th>Child</th><th>DOB</th><th>Age at test</th><th>Tested</th>
+      ${Array.from({ length: maxL }, (_, i) => `<th>List ${i + 1}</th><th class="num">Score</th>`).join('')}
+      <th class="num">Total</th><th class="num">% correct</th></tr></thead>
+    <tbody>${rows.map(({ k, s }) => `<tr>
+      <td class="k">${esc(k.code)}</td><td class="muted">${k.dob ? fmtDate(k.dob) : '<span style="color:var(--bad-tx)">missing</span>'}</td>
+      <td>${ym(k.ageMo)}</td><td class="muted">${fmtDate(k.adms[0]?.tTest)}</td>
+      ${Array.from({ length: maxL }, (_, i) => { const x = s.per[i]; return x
+        ? `<td>${esc(x.a.listName)}</td><td class="num">${x.c}/${x.n}</td>` : '<td></td><td></td>'; }).join('')}
+      <td class="num">${s.c}/${s.n}</td><td class="num"><b>${f0(s.p)}</b></td>
+    </tr>`).join('')}</tbody>`;
+  $('dl-child').onclick = () => download('ktt_per_child.csv', csv([
+    ['participant', 'dob', 'age_months', 'age_ym', 'test_date', ...Array.from({ length: maxL }, (_, i) => [`list${i + 1}`, `list${i + 1}_correct`, `list${i + 1}_n`]).flat(), 'total_correct', 'total_n', 'pct_correct'],
+    ...rows.map(({ k, s }) => [k.code, k.dob ? k.dob.toISOString().slice(0, 10) : '', k.ageMo, ym(k.ageMo), k.adms[0]?.tTest?.toISOString().slice(0, 10),
+      ...Array.from({ length: maxL }, (_, i) => s.per[i] ? [s.per[i].a.listName, s.per[i].c, s.per[i].n] : ['', '', '']).flat(),
+      s.c, s.n, Number.isFinite(s.p) ? s.p.toFixed(1) : '']),
+  ]));
+}
+
+// ── Score by age (scatter) ─────────────────────────────────────────────────
+function renderAge(kidsIn, use) {
+  const pts = kidsIn.filter(k => k.ageMo != null).map(k => ({ k, x: k.ageMo / 12, s: childScore(k, use) })).filter(p => p.s.n);
+  const W = 720, H = 240, L = 44, R = 12, T = 10, B = 34;
+  const x0 = 2, x1 = 7;
+  const X = v => L + (W - L - R) * (Math.min(Math.max(v, x0), x1) - x0) / (x1 - x0), Y = v => T + (H - T - B) * (1 - v / 100);
+  let g = '';
+  [0, 25, 50, 75, 100].forEach(v => { g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text class="axis-lbl" x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${v}%</text>`; });
+  for (let a = x0; a <= x1; a++) g += `<text class="axis-lbl" x="${X(a)}" y="${H - B + 14}" text-anchor="middle">${a}</text>`;
+  g += `<text class="axis-lbl" x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">Age at test (years)</text>`;
+  const dots = pts.map(p => `<g data-tip="${esc(`<b>${p.k.code}</b><br>Age ${ym(p.k.ageMo)}<br>${p.s.c}/${p.s.n} correct (${f0(p.s.p)}%)<br>${p.k.adms.map(a => esc(a.listName)).join(', ')}`)}">
+      <circle cx="${X(p.x)}" cy="${Y(p.s.p)}" r="12" fill="transparent"/>
+      <circle cx="${X(p.x)}" cy="${Y(p.s.p)}" r="5" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2"/></g>`).join('');
+  $('age-plot').innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;height:auto;display:block" role="img" aria-label="Percent correct by age, one dot per child">${g}${dots}</svg>`;
+  const r = pearson(pts.map(p => p.x), pts.map(p => p.s.p));
+  $('age-note').textContent = pts.length >= 8
+    ? `n = ${pts.length} children; Pearson r = ${r.toFixed(2)} between age and % correct.`
+    : `n = ${pts.length} child${pts.length === 1 ? '' : 'ren'} with a known age. A correlation is shown once there are at least 8.`;
+}
+
+// ── Per list and list order ────────────────────────────────────────────────
+function renderLists(kidsIn, use) {
+  const adm = kidsIn.flatMap(k => k.adms.map(a => { const ts = a.trials.filter(use); return { a, n: ts.length, c: ts.filter(t => t.correct).length }; })).filter(x => x.n);
+  const group = keyFn => { const m = new Map(); adm.forEach(x => { const k = keyFn(x); if (k == null) return; (m.get(k) || m.set(k, []).get(k)).push(x); }); return m; };
+  const summ = xs => { const ps = xs.map(x => pct(x.c, x.n)); return { n: xs.length, mean: ps.reduce((a, b) => a + b, 0) / ps.length, lo: Math.min(...ps), hi: Math.max(...ps) }; };
+  const L = [...group(x => x.a.listName)].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+  $('t-list').innerHTML = `<thead><tr><th>List</th><th class="num">Administrations</th><th class="num">Mean % correct</th><th class="num">Range</th></tr></thead>
+    <tbody>${L.map(([name, xs]) => { const s = summ(xs); return `<tr><td class="k">${esc(name)}</td><td class="num">${s.n}</td><td class="num"><b>${f0(s.mean)}</b></td><td class="num muted">${f0(s.lo)}–${f0(s.hi)}</td></tr>`; }).join('')}</tbody>`;
+  const O = [...group(x => x.a.seq)].sort((a, b) => a[0] - b[0]);
+  $('t-order').innerHTML = O.length ? `<thead><tr><th>Order given</th><th class="num">Administrations</th><th class="num">Mean % correct</th><th class="num">Range</th></tr></thead>
+    <tbody>${O.map(([pos, xs]) => { const s = summ(xs); return `<tr><td>${['1st', '2nd', '3rd', '4th', '5th'][pos - 1] || pos + 'th'} list</td><td class="num">${s.n}</td><td class="num"><b>${f0(s.mean)}</b></td><td class="num muted">${f0(s.lo)}–${f0(s.hi)}</td></tr>`; }).join('')}</tbody>` : '';
+}
+
+// ── Data checks ────────────────────────────────────────────────────────────
+function renderChecks(ds, kidsIn) {
+  const items = [];
+  if (ds.dupes.length) items.push(`<b>${ds.dupes.length} duplicate file${ds.dupes.length === 1 ? '' : 's'} skipped</b> (the same test saved twice): ${esc(ds.dupes.join(', '))}`);
+  const strays = ds.noStudy.filter(f => !ds.dupes.includes(f));
+  if (strays.length) items.push(`<b>No study information</b> in ${esc(strays.join(', '))}. These were saved outside Study mode; list order and kupu order are unknown.`);
+  const noDob = [...ds.kids.values()].filter(k => !k.dob).map(k => k.code);
+  if (noDob.length) items.push(`<b>Date of birth missing</b> for ${esc(noDob.join(', '))}. Load the study export, or enter it in the app.`);
+  if (ds.missing.length) items.push(`<b>Results files not loaded</b> for lists the study record says were saved: ${esc(ds.missing.join('; '))}.`);
+  if (!ds.study) items.push('No study export loaded. Load it to cross-check that every saved list has a results file.');
+  const replays = [], unscored = [];
+  ds.adms.forEach(a => {
+    a.trials.filter(t => t.state === 'empty').forEach(t => replays.push(`${a.code} ${t.kupu}`));
+    const scored = new Set(a.trials.filter(t => t.state !== 'empty').map(t => t.kupu));
+    a.kupu.filter(k => !scored.has(k)).forEach(k => unscored.push(`${a.code} ${a.listName}: ${k}`));
+  });
+  if (unscored.length) items.push(`<b>Kupu never scored</b> (left out of the analysis): ${esc(unscored.join('; '))}.`);
+  if (replays.length) items.push(`Played again without a further score (treated as a replay, not a trial): ${esc(replays.join(', '))}.`);
+  const cal = [...new Set(ds.adms.map(a => a.cal ? (a.cal.isCalibrated ? `${a.cal.measuredDbA} dB A max (${a.cal.source?.label ? 'preset: ' + a.cal.source.label : 'measured'})` : 'uncalibrated') : 'unknown'))];
+  const calLine = `Calibration in these files: ${esc(cal.join('; '))}.`;
+  if (ds.ignored.length) items.push(`Not KTT files, ignored: ${esc(ds.ignored.join(', '))}.`);
+  $('checks').innerHTML = (items.length
+    ? `<ul class="checks">${items.map(i => `<li>${i}</li>`).join('')}</ul>`
+    : '<div class="okline">✓ No problems found.</div>') + `<div class="note">${calLine}</div>`;
+}
+
+render();
+})();
+</script>
+</body>
+</html>
