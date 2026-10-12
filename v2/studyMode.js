@@ -287,7 +287,10 @@
     const p = String(s.current.participant);
     const done = Object.assign({}, s.done);
     done[p] = Array.from(new Set([...(done[p] || []), list.id]));
-    save({ done, current: null });
+    // Keep `current`: a second save of the same test (e.g. Save, then Save &
+    // print) must still carry the study block. It is replaced when the next
+    // list starts, and cleared by a normal manual test or a participant change.
+    save({ done });
   }
   function startList(p, listId, step, of) {
     const s = save({ current: { participant: p, listId, step, of } });
